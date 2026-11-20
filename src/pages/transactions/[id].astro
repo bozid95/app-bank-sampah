@@ -1,0 +1,60 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { Printer } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import LinkButton from '../../components/app/LinkButton.astro';
+import { Receipt } from '../../components/views/Receipt';
+import { ErrorAlert } from '../../components/views/forms';
+import { RECEIPT_INCLUDE, receiptData } from '../../lib/receipt';
+import { VoidError, voidTransaction } from '../../lib/transactions';
+import { prisma } from '../../lib/prisma';
+import { flash, parseId, str } from '../../lib/format';
+
+const user = Astro.locals.user!;
+const id = parseId(Astro.params.id);
+let error = '';
+
+if (id && Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  if (str(fd, '_action') === 'void') {
+    const reason = str(fd, 'reason');
+    const returnTo = str(fd, 'returnTo');
+    const back = returnTo === '/' || /^\/(transactions|customers)(\/|\?|$)/.test(returnTo) ? returnTo : '';
+    try {
+      const reversal = await voidTransaction(id, { reason, by: user.username });
+      const number = String(id).padStart(6, '0');
+      return Astro.redirect(
+        back
+          ? flash(back, 'ok', `Transaksi #${number} dibatalkan, saldo sudah dikoreksi.`)
+          : flash(`/transactions/${reversal.id}`, 'ok', 'Transaksi dibatalkan dan saldo dikoreksi. Silakan catat ulang yang benar.'),
+      );
+    } catch (e) {
+      if (!(e instanceof VoidError)) throw e;
+      if (back) return Astro.redirect(flash(back, 'err', e.message));
+      error = e.message;
+    }
+  }
+}
+
+const transaction = id ? await prisma.transaction.findUnique({ where: { id }, include: RECEIPT_INCLUDE }) : null;
+if (!transaction) return new Response('Transaksi tidak ditemukan', { status: 404 });
+---
+
+<Layout title="Detail Transaksi" back="/transactions">
+  <h1>Transaksi #{String(transaction.id).padStart(6, '0')}</h1>
+  {error && <div class="mx-auto mb-4 max-w-md"><ErrorAlert message={error} /></div>}
+  <Receipt r={receiptData(transaction, Astro.locals.config)} />
+  <div class="mx-auto mt-4 flex max-w-md flex-wrap gap-2 print:hidden">
+    <LinkButton href={`/customers/${transaction.customerId}`} variant="outline" class="h-11 flex-1 rounded-xl">Buku tabungan</LinkButton>
+    <Button variant="outline" className="h-11 flex-1 rounded-xl" data-print><Printer /> Cetak</Button>
+    {
+      transaction.reversalOfId ? (
+        <LinkButton href={transaction.type === 'DEPOSIT' ? `/transactions/withdraw?customer=${transaction.customerId}` : `/transactions/deposit?customer=${transaction.customerId}`} class="h-11 w-full rounded-xl text-base">
+          Catat ulang yang benar
+        </LinkButton>
+      ) : (
+        <LinkButton href="/" class="h-11 w-full rounded-xl text-base">Selesai</LinkButton>
+      )
+    }
+  </div>
+</Layout>

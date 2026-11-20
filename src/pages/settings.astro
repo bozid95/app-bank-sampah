@@ -1,0 +1,248 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { SettingsForm, type SettingsTab } from '../components/views/SettingsForm';
+import { THEME_MODES, TIMEZONES, isAccountPrefix, isHexColor, isThemeMode, saveAppConfig } from '../lib/config';
+import { ECO_LEVELS, type EcoLevel } from '../lib/ecoImpact';
+import { flash, str } from '../lib/format';
+
+const config = Astro.locals.config;
+const parseTab = (v: string | null): SettingsTab =>
+  v === 'rules' || v === 'levels' ? v : 'general';
+
+let activeTab: SettingsTab = parseTab(Astro.url.searchParams.get('tab'));
+let error = '';
+let values = {
+  appName: config.appName,
+  organizationName: config.organizationName,
+  tagline: config.tagline,
+  address: config.address ?? '',
+  phone: config.phone ?? '',
+  email: config.email ?? '',
+  primaryColor: config.primaryColor,
+  defaultTheme: String(config.defaultTheme),
+  accountNumberPrefix: config.accountNumberPrefix,
+  timezone: config.timezone,
+  receiptFooter: config.receiptFooter ?? '',
+  warnWeightKg: String(config.warnWeightKg),
+  warnWithdrawAmount: String(config.warnWithdrawAmount),
+  ecoLevels: config.ecoLevels.map((l) => ({
+    level: l.level,
+    name: l.name,
+    minKg: String(l.minKg),
+    tagline: l.tagline,
+  })),
+};
+
+if (Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  activeTab = parseTab(str(fd, '_tab'));
+  const ecoLevelInputs = ECO_LEVELS.map((def) => ({
+    level: def.level,
+    name: str(fd, `ecoLevelName_${def.level}`),
+    minKg: def.level === 1 ? '0' : str(fd, `ecoLevelMinKg_${def.level}`),
+    tagline: str(fd, `ecoLevelTagline_${def.level}`),
+  }));
+
+  values = {
+    appName: str(fd, 'appName'),
+    organizationName: str(fd, 'organizationName'),
+    tagline: str(fd, 'tagline'),
+    address: str(fd, 'address'),
+    phone: str(fd, 'phone'),
+    email: str(fd, 'email'),
+    primaryColor: str(fd, 'primaryColor').toLowerCase(),
+    defaultTheme: str(fd, 'defaultTheme'),
+    accountNumberPrefix: str(fd, 'accountNumberPrefix').toUpperCase(),
+    timezone: str(fd, 'timezone'),
+    receiptFooter: str(fd, 'receiptFooter'),
+    warnWeightKg: str(fd, 'warnWeightKg'),
+    warnWithdrawAmount: str(fd, 'warnWithdrawAmount'),
+    ecoLevels: ecoLevelInputs,
+  };
+
+  const parseThreshold = (raw: string) => {
+    const cleaned = raw.replace(/\./g, '').trim();
+    if (!/^\d+$/.test(cleaned)) return null;
+    const n = Number(cleaned);
+    return Number.isSafeInteger(n) && n >= 0 && n <= 2_000_000_000 ? n : null;
+  };
+  const warnWeightKg = parseThreshold(values.warnWeightKg);
+  const warnWithdrawAmount = parseThreshold(values.warnWithdrawAmount);
+
+  const parsedLevels: EcoLevel[] = [];
+  let levelError = '';
+  for (let i = 0; i < ECO_LEVELS.length; i++) {
+    const def = ECO_LEVELS[i]!;
+    const inp = ecoLevelInputs[i]!;
+    const minKg = i === 0 ? 0 : parseThreshold(inp.minKg);
+    if (inp.name.length < 2 || inp.name.length > 40) {
+      levelError = `Nama Level ${def.level} wajib diisi (2–40 karakter).`;
+      break;
+    }
+    if (minKg === null) {
+      levelError = `Minimal berat Level ${def.level} harus berupa bilangan bulat.`;
+      break;
+    }
+    if (i > 0 && minKg <= parsedLevels[i - 1]!.minKg) {
+      levelError = `Minimal berat Level ${def.level} harus lebih besar dari Level ${def.level - 1} (${parsedLevels[i - 1]!.minKg} kg).`;
+      break;
+    }
+    parsedLevels.push({
+      level: def.level,
+      name: inp.name,
+      minKg,
+      tagline: inp.tagline.slice(0, 120) || def.tagline,
+      tone: def.tone,
+    });
+  }
+
+  if (values.appName.length < 2 || values.appName.length > 40) {
+    activeTab = 'general';
+    error = 'Nama aplikasi wajib diisi (2–40 karakter).';
+  } else if (values.organizationName.length < 2 || values.organizationName.length > 100) {
+    activeTab = 'general';
+    error = 'Nama organisasi wajib diisi (2–100 karakter).';
+  } else if (values.tagline.length > 120) {
+    activeTab = 'general';
+    error = 'Slogan maksimal 120 karakter.';
+  } else if (values.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email)) {
+    activeTab = 'general';
+    error = 'Format email tidak valid.';
+  } else if (!isHexColor(values.primaryColor)) {
+    activeTab = 'rules';
+    error = 'Warna utama tidak valid.';
+  } else if (!isThemeMode(values.defaultTheme)) {
+    activeTab = 'rules';
+    error = 'Mode tema tidak valid.';
+  } else if (!isAccountPrefix(values.accountNumberPrefix)) {
+    activeTab = 'rules';
+    error = 'Awalan no. rekening harus 1–6 huruf besar atau angka.';
+  } else if (!TIMEZONES.some((t) => t.value === values.timezone)) {
+    activeTab = 'rules';
+    error = 'Zona waktu tidak valid.';
+  } else if (warnWeightKg === null) {
+    activeTab = 'rules';
+    error = 'Batas peringatan berat harus berupa bilangan bulat 0 atau lebih.';
+  } else if (warnWithdrawAmount === null) {
+    activeTab = 'rules';
+    error = 'Batas peringatan penarikan harus berupa bilangan bulat 0 atau lebih.';
+  } else if (levelError) {
+    activeTab = 'levels';
+    error = levelError;
+  } else {
+    await saveAppConfig({
+      appName: values.appName,
+      organizationName: values.organizationName,
+      tagline: values.tagline,
+      address: values.address.slice(0, 255) || null,
+      phone: values.phone.slice(0, 30) || null,
+      email: values.email.slice(0, 100) || null,
+      primaryColor: values.primaryColor,
+      defaultTheme: values.defaultTheme,
+      accountNumberPrefix: values.accountNumberPrefix,
+      timezone: values.timezone,
+      receiptFooter: values.receiptFooter.slice(0, 300) || null,
+      warnWeightKg,
+      warnWithdrawAmount,
+      ecoLevels: parsedLevels,
+    });
+    const dest = activeTab === 'general' ? '/settings' : `/settings?tab=${activeTab}`;
+    return Astro.redirect(flash(dest, 'ok', 'Pengaturan disimpan.'));
+  }
+}
+---
+
+<Layout title="Pengaturan" back="/menu" form>
+  <h1>Pengaturan</h1>
+  <p class="page-desc">Identitas, skema warna, tema, dan aturan aplikasi untuk organisasi Anda.</p>
+  <div class="max-w-3xl">
+    <SettingsForm values={values} error={error} timezones={TIMEZONES} themeModes={THEME_MODES} activeTab={activeTab} />
+  </div>
+</Layout>
+
+<script>
+  function initSettings() {
+    const form = document.getElementById('settings-form') as HTMLFormElement | null;
+    if (!form || form.dataset.bound === '1') return;
+    form.dataset.bound = '1';
+
+    const tabInput = document.getElementById('settings-active-tab') as HTMLInputElement | null;
+    const tabButtons = form.querySelectorAll<HTMLButtonElement>('[data-tab-btn]');
+    const tabPanels = form.querySelectorAll<HTMLElement>('[data-tab-panel]');
+
+    function activateTab(id: string, updateUrl = true) {
+      tabButtons.forEach((btn) => {
+        const active = btn.dataset.tabBtn === id;
+        btn.dataset.active = String(active);
+        btn.setAttribute('aria-selected', String(active));
+      });
+      tabPanels.forEach((panel) => {
+        panel.hidden = panel.dataset.tabPanel !== id;
+      });
+      if (tabInput) tabInput.value = id;
+      if (updateUrl) {
+        const url = new URL(location.href);
+        if (id === 'general') url.searchParams.delete('tab');
+        else url.searchParams.set('tab', id);
+        history.replaceState(null, '', url.pathname + url.search);
+      }
+    }
+
+    tabButtons.forEach((btn) =>
+      btn.addEventListener('click', () => {
+        if (btn.dataset.tabBtn) activateTab(btn.dataset.tabBtn);
+      }),
+    );
+
+    form.addEventListener(
+      'invalid',
+      (e) => {
+        const target = e.target as HTMLElement | null;
+        const panel = target?.closest<HTMLElement>('[data-tab-panel]');
+        if (panel?.hidden && panel.dataset.tabPanel) {
+          activateTab(panel.dataset.tabPanel);
+        }
+      },
+      true,
+    );
+
+    const input = document.getElementById('primaryColor') as HTMLInputElement | null;
+    const presetButtons = form.querySelectorAll<HTMLButtonElement>('[data-color]');
+    const previewColor = (color: string) => {
+      document.documentElement.style.setProperty('--brand', color);
+      presetButtons.forEach((b) => {
+        b.dataset.selected = String(b.dataset.color?.toLowerCase() === color.toLowerCase());
+      });
+    };
+    input?.addEventListener('input', () => previewColor(input.value));
+    presetButtons.forEach((b) =>
+      b.addEventListener('click', () => {
+        if (!input || !b.dataset.color) return;
+        input.value = b.dataset.color;
+        previewColor(input.value);
+      }),
+    );
+
+    const themeSelect = document.getElementById('defaultTheme') as HTMLSelectElement | null;
+    const applyPreviewTheme = (v: string) => {
+      const isDark = v === 'dark' || (v === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.classList.toggle('dark', isDark);
+    };
+
+    themeSelect?.addEventListener('change', () => {
+      applyPreviewTheme(themeSelect.value);
+    });
+
+    const previewThemeBtns = form.querySelectorAll<HTMLButtonElement>('[data-preview-theme]');
+    previewThemeBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.previewTheme;
+        if (mode === 'dark' || mode === 'light') {
+          document.documentElement.classList.toggle('dark', mode === 'dark');
+        }
+      });
+    });
+  }
+
+  document.addEventListener('astro:page-load', initSettings);
+</script>

@@ -1,0 +1,195 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { DepositForm } from '../../components/views/DepositForm';
+import { MobileEmpty } from '../../components/mobile/Lists';
+import { CustomerPicker } from '../../components/app/CustomerPicker';
+import { toCustomerOption } from '../../lib/customerOption';
+import { prisma } from '../../lib/prisma';
+import { flash, formatDateTime, formatRupiah, parseDecimal, parseId, str } from '../../lib/format';
+import { VoidError, loadFixTarget, reverseTransaction } from '../../lib/transactions';
+import { Prisma } from '../../generated/prisma/client';
+
+const user = Astro.locals.user!;
+
+const fixId = parseId(Astro.url.searchParams.get('fix'));
+const { target: fixTarget, error: fixError } = await loadFixTarget(fixId, 'DEPOSIT');
+const fixNumber = fixTarget ? String(fixTarget.id).padStart(6, '0') : '';
+const fixPrices = new Map((fixTarget?.items ?? []).map((i) => [i.wasteTypeId, i.pricePerKg]));
+
+const [customerCount, wasteTypeRows] = await Promise.all([
+  prisma.customer.count(),
+  prisma.wasteType.findMany({
+    where: { OR: [{ isActive: true }, { id: { in: [...fixPrices.keys()] } }] },
+    orderBy: { name: 'asc' },
+  }),
+]);
+const wasteTypes = wasteTypeRows.map((w) => ({ ...w, pricePerKg: fixPrices.get(w.id) ?? w.pricePerKg }));
+
+let error = '';
+let selectedCustomerId = parseId(Astro.url.searchParams.get('customer')) ?? fixTarget?.customerId ?? null;
+const backHref = fixTarget ? '/transactions' : selectedCustomerId ? `/customers/${selectedCustomerId}` : '/';
+let note = fixTarget?.note ?? '';
+let fixReason = 'Salah input';
+const weightInputs: Record<number, string> = Object.fromEntries(
+  (fixTarget?.items ?? []).map((i) => [i.wasteTypeId, String(i.weightKg).replace('.', ',')]),
+);
+
+if (Astro.request.method === 'POST' && !fixError) {
+  const fd = await Astro.request.formData();
+  selectedCustomerId = parseId(str(fd, 'customerId'));
+  note = str(fd, 'note').slice(0, 255);
+  fixReason = str(fd, 'fixReason');
+
+  const items: { wasteTypeId: number; weightKg: Prisma.Decimal; pricePerKg: Prisma.Decimal; subtotal: Prisma.Decimal }[] = [];
+  for (const w of wasteTypes) {
+    const raw = str(fd, `weight_${w.id}`);
+    weightInputs[w.id] = raw;
+    if (raw === '') continue;
+    const weightKg = parseDecimal(raw, 3);
+    if (!weightKg || weightKg.lte(0)) {
+      error = `Berat untuk ${w.name} tidak valid (gunakan angka, maks. 3 desimal).`;
+      break;
+    }
+    items.push({
+      wasteTypeId: w.id,
+      weightKg,
+      pricePerKg: w.pricePerKg,
+      subtotal: weightKg.mul(w.pricePerKg).toDecimalPlaces(2),
+    });
+  }
+
+  if (!error && !selectedCustomerId) error = 'Pilih nasabah.';
+  if (!error && items.length === 0) error = 'Isi berat minimal satu jenis sampah.';
+  if (!error && fixTarget && fixReason.trim().length < 5) error = 'Isi alasan perbaikan (min. 5 karakter).';
+
+  if (!error && selectedCustomerId) {
+    const amount = items.reduce((sum, i) => sum.add(i.subtotal), new Prisma.Decimal(0));
+    const customerId = selectedCustomerId;
+    try {
+      const transaction = await prisma.$transaction(async (tx) => {
+        // Perbaikan: batalkan setoran lama lalu catat yang baru dalam satu transaksi database
+        if (fixTarget) await reverseTransaction(tx, fixTarget.id, { reason: `Diperbaiki: ${fixReason.trim()}`, by: user.username });
+        const customer = await tx.customer.update({
+          where: { id: customerId },
+          data: { balance: { increment: amount } },
+        });
+        return tx.transaction.create({
+          data: {
+            customerId,
+            type: 'DEPOSIT',
+            amount,
+            balanceAfter: customer.balance,
+            note: (fixTarget ? [`Perbaikan #${fixNumber}`, note].filter(Boolean).join(' · ') : note).slice(0, 255) || null,
+            processedBy: user.username,
+            items: { create: items },
+          },
+        });
+      });
+      return Astro.redirect(
+        flash(
+          `/transactions/${transaction.id}`,
+          'ok',
+          fixTarget ? `Transaksi #${fixNumber} diperbaiki. Setoran baru ${formatRupiah(amount)} tercatat.` : `Setoran ${formatRupiah(amount)} tercatat.`,
+        ),
+      );
+    } catch (e) {
+      error = e instanceof VoidError ? e.message : 'Gagal menyimpan setoran. Pastikan nasabah masih ada.';
+    }
+  }
+}
+
+// Nasabah terpilih (dari ?customer= atau isian sebelumnya); daftar lain dicari lewat CustomerPicker
+const selectedCustomer = selectedCustomerId
+  ? await prisma.customer.findUnique({ where: { id: selectedCustomerId } })
+  : null;
+const fixCustomer = fixTarget ? await prisma.customer.findUnique({ where: { id: fixTarget.customerId } }) : null;
+const fix = fixTarget
+  ? {
+      number: fixNumber,
+      summary: `Setoran ${formatRupiah(fixTarget.amount)} · ${fixCustomer?.name ?? '-'} · ${formatDateTime(fixTarget.createdAt)}`,
+      reason: fixReason,
+      detailHref: `/transactions/${fixTarget.id}`,
+    }
+  : undefined;
+---
+
+<Layout title={fix ? 'Perbaiki Setoran' : 'Setor Sampah'} back={backHref} form>
+  <h1>{fix ? 'Perbaiki Setoran' : 'Setor Sampah'}</h1>
+  <p class="page-desc">Catat sampah yang disetor nasabah. Nilai otomatis masuk ke saldo.</p>
+  {
+    fixError ? (
+      <MobileEmpty>{fixError} <a href="/transactions" class="font-semibold text-primary">Kembali ke riwayat</a></MobileEmpty>
+    ) : wasteTypes.length === 0 ? (
+      <MobileEmpty>Belum ada jenis sampah aktif. <a href="/waste-types" class="font-semibold text-primary">Tambah jenis sampah</a> dulu.</MobileEmpty>
+    ) : customerCount === 0 ? (
+      <MobileEmpty>Belum ada nasabah. <a href="/customers/new" class="font-semibold text-primary">Tambah nasabah</a> dulu.</MobileEmpty>
+    ) : (
+      <DepositForm
+        wasteTypes={wasteTypes.map((w) => ({ id: w.id, name: w.name, price: formatRupiah(w.pricePerKg), priceValue: String(w.pricePerKg) }))}
+        weights={weightInputs}
+        note={note}
+        error={error}
+        cancelHref={backHref}
+        warnWeightKg={Astro.locals.config.warnWeightKg}
+        fix={fix}
+      >
+        <CustomerPicker slot="picker" client:load required initial={selectedCustomer ? toCustomerOption(selectedCustomer) : null} />
+      </DepositForm>
+    )
+  }
+</Layout>
+
+<script>
+  import { rupiah as currency, setupConfirmSheet } from '../../lib/client/confirmSheet';
+
+  function initDepositForm() {
+    const depositForm = document.getElementById('deposit-form') as HTMLFormElement | null;
+    if (!depositForm || depositForm.dataset.bound === '1') return;
+    depositForm.dataset.bound = '1';
+
+    const heavyKg = Number(depositForm.dataset.warnWeight ?? 100);
+    const weightInputs = depositForm.querySelectorAll<HTMLInputElement>('input.weight');
+    const totalLabels = depositForm.querySelectorAll('.js-total');
+
+    function recalculate() {
+      let total = 0;
+      weightInputs.forEach((input) => {
+        const weight = parseFloat(input.value.replace(',', '.'));
+        const price = parseFloat(input.dataset.price ?? '0');
+        const subtotal = Number.isFinite(weight) && weight > 0 ? Math.round(weight * price * 100) / 100 : 0;
+        total += subtotal;
+        const row = input.closest<HTMLElement>('[data-row]');
+        row?.toggleAttribute('data-filled', subtotal > 0);
+        const cell = row?.querySelector('.subtotal');
+        if (cell) cell.textContent = subtotal > 0 ? currency.format(subtotal) : '-';
+      });
+      totalLabels.forEach((el) => (el.textContent = currency.format(total)));
+    }
+    weightInputs.forEach((input) => input.addEventListener('input', recalculate));
+    recalculate();
+
+    const parseWeight = (v: string) => parseFloat(v.replace(',', '.'));
+    setupConfirmSheet(depositForm, 'deposit-confirm', () => {
+      const customer = document.getElementById('customerId') as HTMLInputElement | null;
+      const rows: { label: string; value: string; strong?: boolean }[] = [
+        { label: 'Nasabah', value: customer?.dataset.customerName || '-' },
+      ];
+      const fixNumber = depositForm.dataset.fixNumber;
+      if (fixNumber) rows.unshift({ label: 'Menggantikan', value: `#${fixNumber} (dibatalkan)` });
+      const warnings: string[] = [];
+      let total = 0;
+      weightInputs.forEach((input) => {
+        const weight = parseWeight(input.value);
+        if (!Number.isFinite(weight) || weight <= 0) return;
+        const subtotal = Math.round(weight * Number(input.dataset.price ?? 0) * 100) / 100;
+        total += subtotal;
+        rows.push({ label: `${input.dataset.name} · ${input.value} kg`, value: currency.format(subtotal) });
+        if (heavyKg > 0 && weight > heavyKg) warnings.push(`Berat ${input.dataset.name} ${input.value} kg cukup besar. Pastikan tidak salah ketik.`);
+      });
+      rows.push({ label: 'Total setoran', value: currency.format(total), strong: true });
+      return { rows, warnings };
+    });
+  }
+
+  document.addEventListener('astro:page-load', initDepositForm);
+</script>

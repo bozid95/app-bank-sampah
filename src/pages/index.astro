@@ -1,0 +1,170 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { COUNTED, transactionStatus, txActions } from '../lib/transactions';
+import { TxActionDialogs } from '../components/views/TxActions';
+import Icon from '../components/Icon.astro';
+import LinkButton from '../components/app/LinkButton.astro';
+import { QuickActions, SummaryCard, WalletHero } from '../components/mobile/Wallet';
+import { SectionHeader, TransactionList } from '../components/mobile/Lists';
+import { groupTransactions } from '../lib/mobile';
+import DepositChart, { type DailyPoint } from '../components/views/DepositChart';
+import { RecentTransactionsCard, StatCards, TopCustomersCard, WasteCompositionCard } from '../components/views/Dashboard';
+import { CommunityImpactBanner } from '../components/views/EcoImpactCard';
+import { loadCommunityEcoImpact } from '../lib/ecoImpact';
+import { prisma } from '../lib/prisma';
+import { getTimezone } from '../lib/config';
+import { formatDateTime, formatKg, formatRupiah, formatShortDate, initials, startOfDay, startOfMonth, toIsoDate } from '../lib/format';
+
+const user = Astro.locals.user!;
+if (user.role !== 'ADMIN') return Astro.redirect('/me');
+
+const tz = getTimezone(Astro.locals.config.timezone);
+const monthStart = startOfMonth(tz.offsetHours);
+const CHART_DAYS = 30;
+const chartStart = new Date(startOfDay(tz.offsetHours).getTime() - (CHART_DAYS - 1) * 86_400_000);
+
+const [
+  customerCount,
+  newCustomers,
+  balanceSum,
+  monthDeposits,
+  monthWithdrawals,
+  monthlyWeight,
+  composition,
+  recentTransactions,
+  topCustomers,
+  chartRows,
+  communityImpact,
+] = await Promise.all([
+  prisma.customer.count(),
+  prisma.customer.count({ where: { createdAt: { gte: monthStart } } }),
+  prisma.customer.aggregate({ _sum: { balance: true } }),
+  prisma.transaction.aggregate({ _sum: { amount: true }, _count: true, where: { ...COUNTED, type: 'DEPOSIT', createdAt: { gte: monthStart } } }),
+  prisma.transaction.aggregate({ _sum: { amount: true }, where: { ...COUNTED, type: 'WITHDRAWAL', createdAt: { gte: monthStart } } }),
+  prisma.depositItem.aggregate({ _sum: { weightKg: true }, where: { transaction: { ...COUNTED, createdAt: { gte: monthStart } } } }),
+  prisma.depositItem.groupBy({
+    by: ['wasteTypeId'],
+    _sum: { weightKg: true },
+    where: { transaction: { ...COUNTED, createdAt: { gte: monthStart } } },
+  }),
+  prisma.transaction.findMany({ orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 8, include: { customer: true } }),
+  prisma.customer.findMany({ orderBy: { balance: 'desc' }, take: 5, where: { balance: { gt: 0 } } }),
+  prisma.transaction.findMany({
+    where: { ...COUNTED, createdAt: { gte: chartStart } },
+    select: { type: true, amount: true, createdAt: true },
+  }),
+  loadCommunityEcoImpact(Astro.locals.config.ecoLevels),
+]);
+
+const wasteNames = new Map(
+  (await prisma.wasteType.findMany({ where: { id: { in: composition.map((c) => c.wasteTypeId) } }, select: { id: true, name: true } }))
+    .map((w) => [w.id, w.name]),
+);
+const totalWeight = composition.reduce((s, c) => s + Number(c._sum.weightKg ?? 0), 0);
+const wasteShares = composition
+  .map((c) => ({ name: wasteNames.get(c.wasteTypeId) ?? '-', kg: Number(c._sum.weightKg ?? 0) }))
+  .sort((a, b) => b.kg - a.kg)
+  .slice(0, 6)
+  .map((c) => ({ name: c.name, weight: formatKg(c.kg), percent: totalWeight ? Math.round((c.kg / totalWeight) * 100) : 0 }));
+
+const daily = new Map<string, DailyPoint>();
+for (let i = 0; i < CHART_DAYS; i++) {
+  const d = new Date(chartStart.getTime() + i * 86_400_000 + 12 * 3600_000);
+  daily.set(toIsoDate(d), { label: formatShortDate(d), deposit: 0, withdrawal: 0 });
+}
+for (const t of chartRows) {
+  const point = daily.get(toIsoDate(t.createdAt));
+  if (!point) continue;
+  if (t.type === 'DEPOSIT') point.deposit += Number(t.amount);
+  else point.withdrawal += Number(t.amount);
+}
+
+const stats = {
+  totalBalance: formatRupiah(balanceSum._sum.balance),
+  customerCount,
+  newCustomersThisMonth: newCustomers,
+  monthWeight: formatKg(monthlyWeight._sum.weightKg),
+  monthDepositCount: monthDeposits._count,
+  monthDeposits: formatRupiah(monthDeposits._sum.amount),
+  monthWithdrawals: formatRupiah(monthWithdrawals._sum.amount),
+};
+const recentRows = recentTransactions.map((t) => ({
+  id: t.id,
+  date: formatDateTime(t.createdAt),
+  customerId: t.customerId,
+  customerName: t.customer.name,
+  accountNumber: t.customer.accountNumber,
+  type: t.type,
+  amount: formatRupiah(t.amount),
+  status: transactionStatus(t),
+  actions: txActions(t, t.customer.name),
+}));
+const topRows = topCustomers.map((c) => ({
+  id: c.id,
+  name: c.name,
+  initials: initials(c.name),
+  accountNumber: c.accountNumber,
+  balance: formatRupiah(c.balance),
+}));
+---
+
+<Layout title="Dashboard" home>
+  <Fragment slot="actions">
+    <LinkButton href="/transactions/withdraw" variant="outline" size="sm"><Icon name="out" size={16} /> Tarik saldo</LinkButton>
+    <LinkButton href="/transactions/deposit" size="sm"><Icon name="in" size={16} /> Setor sampah</LinkButton>
+  </Fragment>
+
+  <h1>Dashboard</h1>
+  <p class="page-desc">Ringkasan {Astro.locals.config.organizationName} hari ini.</p>
+
+  <div class="only-mobile">
+    <WalletHero>
+      <SummaryCard
+        title="Total saldo seluruh nasabah"
+        value={stats.totalBalance}
+        stats={[
+          { label: 'Nasabah', value: String(customerCount) },
+          { label: 'Sampah bulan ini', value: stats.monthWeight },
+          { label: 'Setoran bulan ini', value: stats.monthDeposits },
+        ]}
+      />
+    </WalletHero>
+    <QuickActions
+      overlap
+      items={[
+        { label: 'Setor', icon: 'in', tone: 'green', href: '/transactions/deposit' },
+        { label: 'Tarik', icon: 'out', tone: 'orange', href: '/transactions/withdraw' },
+        { label: 'Nasabah baru', icon: 'user-plus', tone: 'blue', href: '/customers/new' },
+        { label: 'Harga sampah', icon: 'tag', tone: 'purple', href: '/waste-types' },
+        { label: 'Nasabah', icon: 'users', tone: 'teal', href: '/customers' },
+        { label: 'Mutasi', icon: 'list', tone: 'green', href: '/transactions' },
+        { label: 'Pengguna', icon: 'shield', tone: 'blue', href: '/users' },
+        { label: 'Lainnya', icon: 'grid', tone: 'orange', href: '/menu' },
+      ]}
+    />
+    <div class="mt-4">
+      <CommunityImpactBanner impact={communityImpact} organizationName={Astro.locals.config.organizationName} />
+    </div>
+    <SectionHeader title="Transaksi terbaru" href="/transactions" />
+    <TransactionList groups={groupTransactions(recentTransactions, { mode: 'admin', hrefBase: '/transactions/', actions: true })} />
+  </div>
+
+  <div class="only-desktop grid gap-4">
+    <StatCards stats={stats} />
+    <CommunityImpactBanner impact={communityImpact} organizationName={Astro.locals.config.organizationName} />
+    <div class="grid gap-4 xl:grid-cols-3">
+      <div class="xl:col-span-2"><DepositChart client:visible data={[...daily.values()]} days={CHART_DAYS} /></div>
+      <WasteCompositionCard items={wasteShares} />
+    </div>
+    <div class="grid gap-4 xl:grid-cols-3">
+      <div class="xl:col-span-2"><RecentTransactionsCard rows={recentRows} /></div>
+      <TopCustomersCard rows={topRows} />
+    </div>
+  </div>
+  <TxActionDialogs />
+</Layout>
+
+<script>
+  import { setupTxActions } from '../lib/client/txActions';
+  document.addEventListener('astro:page-load', setupTxActions);
+</script>

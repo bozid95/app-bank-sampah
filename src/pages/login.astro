@@ -1,0 +1,63 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { LoginView } from '../components/views/LoginView';
+import { prisma } from '../lib/prisma';
+import {
+  DUMMY_HASH,
+  clearLoginFailures,
+  createSession,
+  isSecureRequest,
+  loginBlocked,
+  recordLoginFailure,
+  verifyPassword,
+} from '../lib/auth';
+import { str } from '../lib/format';
+
+const config = Astro.locals.config;
+let error = '';
+let username = '';
+
+if (Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  username = str(fd, 'username').toLowerCase();
+  const password = typeof fd.get('password') === 'string' ? (fd.get('password') as string) : '';
+
+  if (await loginBlocked(username)) {
+    error = 'Terlalu banyak percobaan gagal. Coba lagi dalam 15 menit.';
+  } else {
+    const user = username ? await prisma.user.findUnique({ where: { username } }) : null;
+    const valid = password.length <= 72 && (await verifyPassword(password, user?.passwordHash ?? DUMMY_HASH));
+    if (user && valid) {
+      await clearLoginFailures(username);
+      await createSession(user.id, Astro.cookies, isSecureRequest(Astro.request));
+      return Astro.redirect(user.role === 'ADMIN' ? '/' : '/me');
+    }
+    await recordLoginFailure(username);
+    error = 'Username atau password salah.';
+  }
+}
+---
+
+<Layout title="Masuk">
+  <LoginView
+    appName={config.appName}
+    tagline={config.tagline}
+    footer={`Lupa password? Hubungi petugas ${config.organizationName}${config.phone ? ` (${config.phone})` : ''}.`}
+    username={username}
+    error={error}
+  />
+</Layout>
+
+<script>
+  document.addEventListener('astro:page-load', () => {
+    const btn = document.getElementById('pw-toggle');
+    if (!btn || btn.dataset.bound === '1') return;
+    btn.dataset.bound = '1';
+    const input = document.getElementById('password') as HTMLInputElement | null;
+    btn.addEventListener('click', () => {
+      if (!input) return;
+      input.type = input.type === 'password' ? 'text' : 'password';
+      btn.toggleAttribute('data-shown', input.type === 'text');
+    });
+  });
+</script>

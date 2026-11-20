@@ -1,0 +1,40 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { MobileList, MobilePager } from '../../components/mobile/Lists';
+import { prisma } from '../../lib/prisma';
+import { PAGE_SIZE, formatRupiah, parsePage } from '../../lib/format';
+import { paginationProps } from '../../lib/pagination';
+
+const page = parsePage(Astro.url);
+const [total, wasteTypes] = await Promise.all([
+  prisma.wasteType.count({ where: { isActive: true } }),
+  prisma.wasteType.findMany({
+    where: { isActive: true },
+    orderBy: { name: 'asc' },
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
+  }),
+]);
+const pagination = paginationProps(Astro.url, page, total);
+---
+
+<Layout title="Harga Sampah" back="/me">
+  <h1>Harga Sampah</h1>
+  <p class="page-desc">Harga beli per kilogram yang berlaku saat ini.</p>
+  <div class="max-w-xl">
+    <p class="mb-3 px-1 text-sm text-muted-foreground md:hidden">Harga beli per kilogram yang berlaku saat ini.</p>
+    <div data-swap="prices-list">
+      <MobileList
+        empty="Belum ada daftar harga."
+        items={wasteTypes.map((w) => ({
+          key: w.id,
+          icon: 'tag' as const,
+          title: w.name,
+          right: formatRupiah(w.pricePerKg),
+          rightSub: 'per kg',
+        }))}
+      />
+      <MobilePager {...pagination} />
+    </div>
+  </div>
+</Layout>

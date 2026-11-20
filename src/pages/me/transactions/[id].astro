@@ -1,0 +1,30 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import { Printer } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import LinkButton from '../../../components/app/LinkButton.astro';
+import { Receipt } from '../../../components/views/Receipt';
+import { RECEIPT_INCLUDE, receiptData } from '../../../lib/receipt';
+import { prisma } from '../../../lib/prisma';
+import { parseId } from '../../../lib/format';
+
+const user = Astro.locals.user!;
+const id = parseId(Astro.params.id);
+const transaction =
+  id && user.customerId
+    ? await prisma.transaction.findFirst({
+        where: { id, customerId: user.customerId },
+        include: RECEIPT_INCLUDE,
+      })
+    : null;
+if (!transaction) return new Response('Transaksi tidak ditemukan', { status: 404 });
+---
+
+<Layout title="Detail Transaksi" back="/me/statement">
+  <h1>Detail Transaksi</h1>
+  <Receipt r={receiptData(transaction, Astro.locals.config, '/me/transactions/')} />
+  <div class="mx-auto mt-4 flex max-w-md flex-wrap gap-2 print:hidden">
+    <LinkButton href="/me/statement" variant="outline" class="h-11 flex-1 rounded-xl">Kembali</LinkButton>
+    <Button className="h-11 flex-1 rounded-xl" data-print><Printer /> Cetak bukti</Button>
+  </div>
+</Layout>

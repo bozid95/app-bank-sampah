@@ -1,0 +1,263 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Icon from '../../components/Icon.astro';
+import LinkButton from '../../components/app/LinkButton.astro';
+import { FilterChips, MobilePager, MobileSearch, TransactionList } from '../../components/mobile/Lists';
+import { groupTransactions } from '../../lib/mobile';
+import { TransactionsPanel } from '../../components/views/Transactions';
+import { GlobalStatementPrint } from '../../components/views/GlobalStatementPrint';
+import { getTimezone } from '../../lib/config';
+import { parseMonthParam, recentMonthOptions } from '../../lib/period';
+import { prisma } from '../../lib/prisma';
+import { PAGE_SIZE, formatDateTime, formatKg, formatRupiah, parsePage, transactionLabel } from '../../lib/format';
+import { paginationProps } from '../../lib/pagination';
+import { COUNTED, reversalLabel, transactionStatus, txActions } from '../../lib/transactions';
+import { TxActionDialogs } from '../../components/views/TxActions';
+import type { Prisma, TransactionType } from '../../generated/prisma/client';
+
+const config = Astro.locals.config;
+const tz = getTimezone(config.timezone);
+const typeParam = Astro.url.searchParams.get('type');
+const type: TransactionType | undefined =
+  typeParam === 'DEPOSIT' || typeParam === 'WITHDRAWAL' ? typeParam : undefined;
+const q = (Astro.url.searchParams.get('q') ?? '').trim().slice(0, 80);
+const page = parsePage(Astro.url);
+const month = parseMonthParam(Astro.url.searchParams.get('month'), tz.offsetHours);
+const monthOptions = recentMonthOptions(tz.offsetHours);
+
+const baseWhere: Prisma.TransactionWhereInput = {
+  ...(month ? { createdAt: { gte: month.start, lt: month.end } } : {}),
+  ...(q
+    ? {
+        customer: {
+          OR: [
+            { name: { contains: q, mode: 'insensitive' } },
+            { accountNumber: { contains: q, mode: 'insensitive' } },
+          ],
+        },
+      }
+    : {}),
+};
+
+const where: Prisma.TransactionWhereInput = {
+  ...baseWhere,
+  ...(type ? { type } : {}),
+};
+
+const countedWhere: Prisma.TransactionWhereInput = { ...COUNTED, ...where };
+
+const [
+  total,
+  transactions,
+  depositSum,
+  withdrawalSum,
+  weightSum,
+  customerBalanceSum,
+  wasteGrouped,
+  monthPrintTransactions,
+] = await Promise.all([
+  prisma.transaction.count({ where }),
+  prisma.transaction.findMany({
+    where,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
+    include: { customer: true, items: { include: { wasteType: true } } },
+  }),
+  prisma.transaction.aggregate({ _sum: { amount: true }, where: { ...countedWhere, type: 'DEPOSIT' } }),
+  prisma.transaction.aggregate({ _sum: { amount: true }, where: { ...countedWhere, type: 'WITHDRAWAL' } }),
+  prisma.depositItem.aggregate({ _sum: { weightKg: true }, where: { transaction: countedWhere } }),
+  prisma.customer.aggregate({ _sum: { balance: true } }),
+  prisma.depositItem.groupBy({
+    by: ['wasteTypeId'],
+    _sum: { weightKg: true, subtotal: true },
+    where: { transaction: countedWhere },
+  }),
+  month
+    ? prisma.transaction.findMany({
+        where,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: 1000,
+        include: { customer: true, items: { include: { wasteType: true } } },
+      })
+    : null,
+]);
+
+const wasteNameMap = wasteGrouped.length
+  ? new Map(
+      (
+        await prisma.wasteType.findMany({
+          where: { id: { in: wasteGrouped.map((g) => g.wasteTypeId) } },
+          select: { id: true, name: true },
+        })
+      ).map((w) => [w.id, w.name]),
+    )
+  : new Map<number, string>();
+
+const wasteRecap = wasteGrouped
+  .map((g) => ({
+    name: wasteNameMap.get(g.wasteTypeId) ?? '-',
+    kg: Number(g._sum.weightKg ?? 0),
+    amountNum: Number(g._sum.subtotal ?? 0),
+  }))
+  .sort((a, b) => b.kg - a.kg)
+  .map((g) => ({
+    name: g.name,
+    weight: formatKg(g.kg),
+    amount: formatRupiah(g.amountNum),
+  }));
+
+const filterHref = (t?: TransactionType) => {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (month) params.set('month', month.value);
+  if (t) params.set('type', t);
+  const s = params.toString();
+  return '/transactions' + (s ? `?${s}` : '');
+};
+const filters = [
+  { label: 'Semua', href: filterHref(), active: !type },
+  { label: 'Setor', href: filterHref('DEPOSIT'), active: type === 'DEPOSIT' },
+  { label: 'Tarik', href: filterHref('WITHDRAWAL'), active: type === 'WITHDRAWAL' },
+];
+const pagination = paginationProps(Astro.url, page, total);
+const rows = transactions.map((t) => ({
+  id: t.id,
+  number: String(t.id).padStart(6, '0'),
+  date: formatDateTime(t.createdAt),
+  customerId: t.customerId,
+  customerName: t.customer.name,
+  accountNumber: t.customer.accountNumber,
+  type: t.type,
+  amount: formatRupiah(t.amount),
+  processedBy: t.processedBy,
+  note: t.note,
+  status: transactionStatus(t),
+  actions: txActions(t, t.customer.name),
+}));
+
+const printSource = monthPrintTransactions ?? [...transactions].reverse();
+const printRows = printSource.map((t) => ({
+  id: t.id,
+  number: String(t.id).padStart(6, '0'),
+  date: formatDateTime(t.createdAt),
+  customerName: t.customer.name,
+  accountNumber: t.customer.accountNumber,
+  type: t.type,
+  description: t.reversalOfId
+    ? reversalLabel(t.type)
+    : t.type === 'DEPOSIT' && t.items.length
+      ? t.items.map((i) => `${i.wasteType.name} ${formatKg(i.weightKg)}`).join(', ')
+      : transactionLabel(t.type),
+  note: t.note,
+  amount: formatRupiah(t.amount),
+  processedBy: t.processedBy,
+  status: transactionStatus(t),
+}));
+
+const depNum = Number(depositSum._sum.amount ?? 0);
+const wdNum = Number(withdrawalSum._sum.amount ?? 0);
+const netNum = depNum - wdNum;
+const periodLabel = month ? `Periode ${month.label}` : 'Semua Periode';
+const scopeLabel = month
+  ? `${periodLabel} (${printRows.length} transaksi)`
+  : pagination.totalPages > 1
+    ? `Halaman ${pagination.page} dari ${pagination.totalPages} (${transactions.length} dari ${total} transaksi)`
+    : `Seluruh mutasi (${total} transaksi)`;
+const printedAt = formatDateTime(new Date());
+const statementOrg = {
+  appName: config.appName,
+  organizationName: config.organizationName,
+  address: config.address,
+  phone: config.phone,
+  email: config.email,
+  receiptFooter: config.receiptFooter,
+};
+const globalSummary = {
+  periodLabel,
+  totalDeposits: formatRupiah(depNum),
+  totalWithdrawals: formatRupiah(wdNum),
+  netCashflow: `${netNum >= 0 ? '+' : '−'}${formatRupiah(Math.abs(netNum))}`,
+  totalWeight: formatKg(weightSum._sum.weightKg),
+  totalCustomerBalance: formatRupiah(customerBalanceSum._sum.balance),
+  transactionCount: total,
+};
+const mobileSearchHidden: Record<string, string> = {};
+if (type) mobileSearchHidden.type = type;
+if (month) mobileSearchHidden.month = month.value;
+---
+
+<Layout title="Riwayat Transaksi">
+  <Fragment slot="actions">
+    <LinkButton href="/transactions/withdraw" variant="outline" size="sm"><Icon name="out" size={16} /> Tarik saldo</LinkButton>
+    <LinkButton href="/transactions/deposit" size="sm"><Icon name="in" size={16} /> Setor sampah</LinkButton>
+  </Fragment>
+
+  <h1 class="print:hidden">Riwayat Transaksi</h1>
+  <p class="page-desc print:hidden">Semua setoran sampah dan penarikan saldo.</p>
+
+  <div class="only-desktop print:hidden" data-swap="tx-desktop">
+    <TransactionsPanel
+      rows={rows}
+      q={q}
+      type={type ?? ''}
+      month={month?.value ?? ''}
+      monthOptions={monthOptions}
+      filters={filters}
+      pagination={pagination}
+    />
+  </div>
+
+  <div class="only-mobile">
+    <MobileSearch
+      q={q}
+      placeholder="Cari nama / no. rekening"
+      hidden={Object.keys(mobileSearchHidden).length ? mobileSearchHidden : undefined}
+    />
+    <form method="get" class="mb-3 flex items-center gap-2">
+      {q && <input type="hidden" name="q" value={q} />}
+      {type && <input type="hidden" name="type" value={type} />}
+      <div class="relative flex-1">
+        <select
+          name="month"
+          data-auto-submit
+          aria-label="Filter bulan"
+          class="h-10 w-full appearance-none rounded-xl border border-input bg-card pr-9 pl-3.5 text-sm font-medium outline-none focus:border-ring"
+        >
+          <option value="" selected={!month}>Semua periode</option>
+          {monthOptions.map((m) => (
+            <option value={m.value} selected={month?.value === m.value}>{m.label}</option>
+          ))}
+        </select>
+        <svg class="pointer-events-none absolute top-1/2 right-3 size-4 -translate-y-1/2 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+      <button type="button" data-print class="h-10 rounded-xl bg-primary px-3.5 text-sm font-medium text-primary-foreground">Cetak</button>
+    </form>
+    <div data-swap="tx-mobile">
+      <FilterChips items={filters} />
+      <TransactionList
+        groups={groupTransactions(transactions, { mode: 'admin', hrefBase: '/transactions/', actions: true })}
+        empty="Tidak ada transaksi."
+      />
+      <MobilePager {...pagination} />
+    </div>
+  </div>
+
+  <div data-swap="global-print">
+    <GlobalStatementPrint
+      org={statementOrg}
+      summary={globalSummary}
+      wasteRecap={wasteRecap}
+      rows={printRows}
+      printedAt={printedAt}
+      scopeLabel={scopeLabel}
+    />
+  </div>
+
+  <TxActionDialogs />
+</Layout>
+
+<script>
+  import { setupTxActions } from '../../lib/client/txActions';
+  document.addEventListener('astro:page-load', setupTxActions);
+</script>

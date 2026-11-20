@@ -1,0 +1,15 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import Passbook from '../../../components/Passbook.astro';
+import { prisma } from '../../../lib/prisma';
+import { parseId } from '../../../lib/format';
+
+const id = parseId(Astro.params.id);
+const customer = id ? await prisma.customer.findUnique({ where: { id } }) : null;
+if (!customer) return new Response('Nasabah tidak ditemukan', { status: 404 });
+---
+
+<Layout title={customer.name} back="/customers">
+  <h1 class="print:hidden">Buku Tabungan</h1>
+  <Passbook customerId={customer.id} admin />
+</Layout>

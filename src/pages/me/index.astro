@@ -1,0 +1,56 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { BalanceCard, QuickActions, WalletHero } from '../../components/mobile/Wallet';
+import { MobileEmpty, SectionHeader, TransactionList } from '../../components/mobile/Lists';
+import { EcoImpactCard } from '../../components/views/EcoImpactCard';
+import { loadCustomerEcoImpact } from '../../lib/ecoImpact';
+import { prisma } from '../../lib/prisma';
+import { formatRupiah } from '../../lib/format';
+import { groupTransactions } from '../../lib/mobile';
+
+const user = Astro.locals.user!;
+const customer = user.customerId ? await prisma.customer.findUnique({ where: { id: user.customerId } }) : null;
+const [recentTransactions, ecoImpact] = customer
+  ? await Promise.all([
+      prisma.transaction.findMany({
+        where: { customerId: customer.id },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: 5,
+        include: { items: { include: { wasteType: true } } },
+      }),
+      loadCustomerEcoImpact(customer.id, Astro.locals.config.ecoLevels),
+    ])
+  : [[], null];
+---
+
+<Layout title="Beranda" home>
+  <h1>Beranda</h1>
+  {
+    customer ? (
+      <>
+        <WalletHero>
+          <BalanceCard balance={formatRupiah(customer.balance)} accountNumber={customer.accountNumber} name={customer.name} />
+        </WalletHero>
+        <QuickActions
+          overlap
+          items={[
+            { label: 'Mutasi', icon: 'list', tone: 'green', href: '/me/statement' },
+            { label: 'Harga sampah', icon: 'tag', tone: 'purple', href: '/me/prices' },
+            { label: 'Cetak buku', icon: 'printer', tone: 'blue', href: '/me/statement?print=1' },
+            { label: 'Akun', icon: 'user', tone: 'orange', href: '/menu' },
+          ]}
+        />
+        <div class="md:max-w-xl">
+          {ecoImpact && <EcoImpactCard impact={ecoImpact} />}
+          <SectionHeader title="Transaksi terakhir" href="/me/statement" />
+          <TransactionList
+            groups={groupTransactions(recentTransactions, { mode: 'customer', hrefBase: '/me/transactions/' })}
+            empty="Belum ada transaksi. Yuk setor sampah pertamamu!"
+          />
+        </div>
+      </>
+    ) : (
+      <MobileEmpty>Akun Anda belum dihubungkan ke data nasabah. Hubungi petugas {Astro.locals.config.organizationName}.</MobileEmpty>
+    )
+  }
+</Layout>

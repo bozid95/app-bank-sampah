@@ -1,0 +1,77 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { MobileList, MobilePager } from '../../components/mobile/Lists';
+import { WasteTypeForm, WasteTypesTable } from '../../components/views/WasteTypes';
+import { prisma } from '../../lib/prisma';
+import { PAGE_SIZE, flash, formatRupiah, parsePage, parseRupiah, str } from '../../lib/format';
+import { paginationProps } from '../../lib/pagination';
+
+let error = '';
+let values = { name: '', price: '', isActive: true };
+
+if (Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  values = { name: str(fd, 'name'), price: str(fd, 'price'), isActive: true };
+  const pricePerKg = parseRupiah(fd.get('price'));
+
+  if (values.name.length < 2 || values.name.length > 80) {
+    error = 'Nama jenis sampah wajib diisi (2–80 karakter).';
+  } else if (!pricePerKg || pricePerKg.lte(0)) {
+    error = 'Harga per kg harus berupa angka lebih dari 0 (contoh: 1.500).';
+  } else if (await prisma.wasteType.findUnique({ where: { name: values.name } })) {
+    error = 'Jenis sampah dengan nama itu sudah ada.';
+  } else {
+    await prisma.wasteType.create({ data: { name: values.name, pricePerKg } });
+    return Astro.redirect(flash('/waste-types', 'ok', `${values.name} ditambahkan.`));
+  }
+}
+
+const page = parsePage(Astro.url);
+const [total, wasteTypes] = await Promise.all([
+  prisma.wasteType.count(),
+  prisma.wasteType.findMany({
+    orderBy: { name: 'asc' },
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
+    include: { _count: { select: { depositItems: true } } },
+  }),
+]);
+const pagination = paginationProps(Astro.url, page, total);
+const rows = wasteTypes.map((w) => ({
+  id: w.id,
+  name: w.name,
+  price: formatRupiah(w.pricePerKg),
+  isActive: w.isActive,
+  usage: w._count.depositItems,
+}));
+---
+
+<Layout title="Jenis Sampah" back="/menu">
+  <h1>Jenis & Harga Sampah</h1>
+  <p class="page-desc">Harga beli per kilogram untuk setiap jenis sampah.</p>
+
+  <div class="grid gap-4 lg:grid-cols-[1fr_340px] lg:items-start">
+    <div class="only-desktop" data-swap="waste-desktop"><WasteTypesTable rows={rows} pagination={pagination} /></div>
+    <WasteTypeForm values={values} error={error} mode="create" />
+  </div>
+
+  <div class="only-mobile mt-6">
+    <h2 class="mb-2 px-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">Daftar harga · {total}</h2>
+    <div data-swap="waste-mobile">
+      <MobileList
+        empty="Belum ada jenis sampah."
+        items={rows.map((w) => ({
+          key: w.id,
+          href: `/waste-types/${w.id}`,
+          icon: 'tag' as const,
+          title: w.name,
+          subtitle: w.isActive ? 'Aktif' : 'Nonaktif — tidak muncul di form setor',
+          right: w.price,
+          rightSub: 'per kg',
+          dimmed: !w.isActive,
+        }))}
+      />
+      <MobilePager {...pagination} />
+    </div>
+  </div>
+</Layout>

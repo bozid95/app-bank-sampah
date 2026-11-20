@@ -1,0 +1,67 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { WasteTypeForm } from '../../components/views/WasteTypes';
+import { DangerZone } from '../../components/views/forms';
+import { prisma } from '../../lib/prisma';
+import { flash, parseId, parseRupiah, str } from '../../lib/format';
+
+const id = parseId(Astro.params.id);
+const wasteType = id
+  ? await prisma.wasteType.findUnique({ where: { id }, include: { _count: { select: { depositItems: true } } } })
+  : null;
+if (!wasteType) return new Response('Jenis sampah tidak ditemukan', { status: 404 });
+
+const isUsed = wasteType._count.depositItems > 0;
+const formatPriceInput = (v: { toString(): string }) =>
+  new Intl.NumberFormat('id-ID', { maximumFractionDigits: 2 }).format(Number(v.toString()));
+
+let error = '';
+let values = { name: wasteType.name, price: formatPriceInput(wasteType.pricePerKg), isActive: wasteType.isActive };
+
+if (Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  const action = str(fd, '_action');
+
+  if (action === 'delete') {
+    if (isUsed) {
+      error = 'Jenis sampah ini sudah dipakai di transaksi. Nonaktifkan saja agar riwayat tetap utuh.';
+    } else {
+      await prisma.wasteType.delete({ where: { id: wasteType.id } });
+      return Astro.redirect(flash('/waste-types', 'ok', `${wasteType.name} dihapus.`));
+    }
+  } else {
+    values = { name: str(fd, 'name'), price: str(fd, 'price'), isActive: fd.get('isActive') === 'on' };
+    const pricePerKg = parseRupiah(fd.get('price'));
+    const duplicate = await prisma.wasteType.findFirst({ where: { name: values.name, NOT: { id: wasteType.id } } });
+
+    if (values.name.length < 2 || values.name.length > 80) {
+      error = 'Nama jenis sampah wajib diisi (2–80 karakter).';
+    } else if (!pricePerKg || pricePerKg.lte(0)) {
+      error = 'Harga per kg harus berupa angka lebih dari 0 (contoh: 1.500).';
+    } else if (duplicate) {
+      error = 'Jenis sampah dengan nama itu sudah ada.';
+    } else {
+      await prisma.wasteType.update({
+        where: { id: wasteType.id },
+        data: { name: values.name, pricePerKg, isActive: values.isActive },
+      });
+      return Astro.redirect(flash('/waste-types', 'ok', `${values.name} diperbarui.`));
+    }
+  }
+}
+---
+
+<Layout title="Edit Jenis Sampah" back="/waste-types" form>
+  <h1>Edit Jenis Sampah</h1>
+  <p class="page-desc">Dipakai di {wasteType._count.depositItems} rincian setoran.</p>
+  <div class="max-w-2xl">
+    <WasteTypeForm values={values} error={error} mode="edit" />
+    <DangerZone
+      title="Hapus jenis sampah"
+      description="Hanya bisa jika belum pernah dipakai di transaksi. Jika sudah dipakai, nonaktifkan saja."
+      buttonLabel="Hapus"
+      confirm="Hapus jenis sampah ini?"
+      disabled={isUsed}
+    />
+  </div>
+</Layout>

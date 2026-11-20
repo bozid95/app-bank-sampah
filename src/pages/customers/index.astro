@@ -1,0 +1,74 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { UserPlus } from 'lucide-react';
+import { Fab, MobileList, MobilePager, MobileSearch } from '../../components/mobile/Lists';
+import { CustomersPanel } from '../../components/views/Customers';
+import { prisma } from '../../lib/prisma';
+import { PAGE_SIZE, formatRupiah, initials, parsePage } from '../../lib/format';
+import { paginationProps } from '../../lib/pagination';
+import type { Prisma } from '../../generated/prisma/client';
+
+const q = (Astro.url.searchParams.get('q') ?? '').trim().slice(0, 80);
+const page = parsePage(Astro.url);
+
+const where: Prisma.CustomerWhereInput = q
+  ? {
+      OR: [
+        { name: { contains: q, mode: 'insensitive' } },
+        { accountNumber: { contains: q, mode: 'insensitive' } },
+        { phone: { contains: q } },
+      ],
+    }
+  : {};
+
+const [total, customers] = await Promise.all([
+  prisma.customer.count({ where }),
+  prisma.customer.findMany({
+    where,
+    orderBy: { name: 'asc' },
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
+    include: { user: { select: { id: true } } },
+  }),
+]);
+
+const pagination = paginationProps(Astro.url, page, total);
+const rows = customers.map((c) => ({
+  id: c.id,
+  name: c.name,
+  initials: initials(c.name),
+  accountNumber: c.accountNumber,
+  phone: c.phone,
+  address: c.address,
+  balance: formatRupiah(c.balance),
+  hasAccount: Boolean(c.user),
+}));
+---
+
+<Layout title="Nasabah">
+  <h1>Nasabah</h1>
+  <p class="page-desc">Data nasabah dan saldo tabungan sampah.</p>
+
+  <div class="only-desktop" data-swap="customers-desktop">
+    <CustomersPanel rows={rows} q={q} pagination={pagination} />
+  </div>
+
+  <div class="only-mobile">
+    <MobileSearch q={q} placeholder="Cari nama, no. rekening, telepon" />
+    <div data-swap="customers-mobile">
+      <MobileList
+        empty={q ? 'Nasabah tidak ditemukan.' : 'Belum ada nasabah.'}
+        items={rows.map((c) => ({
+          key: c.id,
+          href: `/customers/${c.id}`,
+          initials: c.initials,
+          title: c.name,
+          subtitle: `${c.accountNumber}${c.phone ? ` · ${c.phone}` : ''}`,
+          right: c.balance,
+        }))}
+      />
+      <MobilePager {...pagination} />
+    </div>
+    <Fab href="/customers/new" label="Tambah nasabah"><UserPlus className="size-6" /></Fab>
+  </div>
+</Layout>

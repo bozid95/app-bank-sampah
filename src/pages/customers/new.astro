@@ -1,0 +1,52 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { CustomerForm } from '../../components/views/CustomerForm';
+import { prisma } from '../../lib/prisma';
+import { flash, str, validateCustomer } from '../../lib/format';
+import { formatAccountNumber } from '../../lib/accounts';
+import { randomBytes } from 'node:crypto';
+
+const prefix = Astro.locals.config.accountNumberPrefix;
+let error = '';
+let values = { name: '', address: '', phone: '' };
+
+if (Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  values = { name: str(fd, 'name'), address: str(fd, 'address'), phone: str(fd, 'phone') };
+  error = validateCustomer(values);
+
+  if (!error) {
+    const customer = await prisma.$transaction(async (tx) => {
+      const created = await tx.customer.create({
+        data: {
+          accountNumber: `TMP-${randomBytes(6).toString('hex')}`,
+          name: values.name,
+          address: values.address || null,
+          phone: values.phone || null,
+        },
+      });
+      return tx.customer.update({
+        where: { id: created.id },
+        data: { accountNumber: formatAccountNumber(prefix, created.id) },
+      });
+    });
+    return Astro.redirect(
+      flash(`/customers/${customer.id}`, 'ok', `Nasabah ${customer.name} ditambahkan (${customer.accountNumber}).`),
+    );
+  }
+}
+---
+
+<Layout title="Tambah Nasabah" back="/customers" form>
+  <h1>Tambah Nasabah</h1>
+  <p class="page-desc">Daftarkan nasabah baru {Astro.locals.config.organizationName}.</p>
+  <div class="max-w-2xl">
+    <CustomerForm
+      values={values}
+      error={error}
+      mode="create"
+      cancelHref="/customers"
+      accountNumberHint={`Nomor rekening dibuat otomatis, mis. ${formatAccountNumber(prefix, 1)}.`}
+    />
+  </div>
+</Layout>

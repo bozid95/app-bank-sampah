@@ -1,0 +1,208 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { WithdrawForm } from '../../components/views/WithdrawForm';
+import { MobileEmpty } from '../../components/mobile/Lists';
+import { CustomerPicker } from '../../components/app/CustomerPicker';
+import { toCustomerOption } from '../../lib/customerOption';
+import { prisma } from '../../lib/prisma';
+import { flash, formatDateTime, formatRupiah, parseId, parseRupiah, str } from '../../lib/format';
+import { VoidError, loadFixTarget, reverseTransaction } from '../../lib/transactions';
+
+const user = Astro.locals.user!;
+const customerCount = await prisma.customer.count();
+
+const INSUFFICIENT_BALANCE = 'INSUFFICIENT_BALANCE';
+let error = '';
+const fixId = parseId(Astro.url.searchParams.get('fix'));
+const { target: fixTarget, error: fixError } = await loadFixTarget(fixId, 'WITHDRAWAL');
+const fixNumber = fixTarget ? String(fixTarget.id).padStart(6, '0') : '';
+
+let selectedCustomerId = parseId(Astro.url.searchParams.get('customer')) ?? fixTarget?.customerId ?? null;
+const backHref = fixTarget ? '/transactions' : selectedCustomerId ? `/customers/${selectedCustomerId}` : '/';
+let amountInput = fixTarget ? new Intl.NumberFormat('id-ID', { maximumFractionDigits: 2 }).format(Number(fixTarget.amount)) : '';
+let note = fixTarget?.note ?? '';
+let fixReason = 'Salah input';
+
+if (Astro.request.method === 'POST' && !fixError) {
+  const fd = await Astro.request.formData();
+  selectedCustomerId = parseId(str(fd, 'customerId'));
+  amountInput = str(fd, 'amount');
+  note = str(fd, 'note').slice(0, 255);
+  fixReason = str(fd, 'fixReason');
+  const amount = parseRupiah(amountInput);
+
+  if (!selectedCustomerId) {
+    error = 'Pilih nasabah.';
+  } else if (!amount || amount.lte(0)) {
+    error = 'Jumlah penarikan harus berupa angka lebih dari 0 (contoh: 25.000).';
+  } else if (fixTarget && fixReason.trim().length < 5) {
+    error = 'Isi alasan perbaikan (min. 5 karakter).';
+  } else {
+    const customerId = selectedCustomerId;
+    try {
+      const transaction = await prisma.$transaction(async (tx) => {
+        // Perbaikan: batalkan penarikan lama (saldo kembali) lalu catat yang baru dalam satu transaksi database
+        if (fixTarget) await reverseTransaction(tx, fixTarget.id, { reason: `Diperbaiki: ${fixReason.trim()}`, by: user.username });
+        // Pengurangan bersyarat: gagal (count 0) jika saldo tidak cukup, aman dari race condition
+        const result = await tx.customer.updateMany({
+          where: { id: customerId, balance: { gte: amount } },
+          data: { balance: { decrement: amount } },
+        });
+        if (result.count === 0) throw new Error(INSUFFICIENT_BALANCE);
+        const customer = await tx.customer.findUniqueOrThrow({ where: { id: customerId } });
+        return tx.transaction.create({
+          data: {
+            customerId,
+            type: 'WITHDRAWAL',
+            amount,
+            balanceAfter: customer.balance,
+            note: (fixTarget ? [`Perbaikan #${fixNumber}`, note].filter(Boolean).join(' · ') : note).slice(0, 255) || null,
+            processedBy: user.username,
+          },
+        });
+      });
+      return Astro.redirect(
+        flash(
+          `/transactions/${transaction.id}`,
+          'ok',
+          fixTarget ? `Transaksi #${fixNumber} diperbaiki. Penarikan baru ${formatRupiah(amount)} tercatat.` : `Penarikan ${formatRupiah(amount)} tercatat.`,
+        ),
+      );
+    } catch (e) {
+      error =
+        e instanceof VoidError
+          ? e.message
+          : e instanceof Error && e.message === INSUFFICIENT_BALANCE
+            ? 'Saldo nasabah tidak mencukupi.'
+            : 'Gagal menyimpan penarikan. Pastikan nasabah masih ada.';
+    }
+  }
+}
+
+// Nasabah terpilih (dari ?customer= atau isian sebelumnya); daftar lain dicari lewat CustomerPicker
+const selectedCustomer = selectedCustomerId
+  ? await prisma.customer.findUnique({ where: { id: selectedCustomerId } })
+  : null;
+const fixCustomer = fixTarget ? await prisma.customer.findUnique({ where: { id: fixTarget.customerId } }) : null;
+const fix = fixTarget
+  ? {
+      number: fixNumber,
+      summary: `Penarikan ${formatRupiah(fixTarget.amount)} · ${fixCustomer?.name ?? '-'} · ${formatDateTime(fixTarget.createdAt)}`,
+      reason: fixReason,
+      detailHref: `/transactions/${fixTarget.id}`,
+      customerId: fixTarget.customerId,
+      credit: String(fixTarget.amount),
+    }
+  : undefined;
+---
+
+<Layout title={fix ? 'Perbaiki Penarikan' : 'Tarik Saldo'} back={backHref} form>
+  <h1>{fix ? 'Perbaiki Penarikan' : 'Tarik Saldo'}</h1>
+  <p class="page-desc">Catat penarikan tunai dari saldo tabungan nasabah.</p>
+  {
+    fixError ? (
+      <MobileEmpty>{fixError} <a href="/transactions" class="font-semibold text-primary">Kembali ke riwayat</a></MobileEmpty>
+    ) : customerCount === 0 ? (
+      <MobileEmpty>Belum ada nasabah. <a href="/customers/new" class="font-semibold text-primary">Tambah nasabah</a> dulu.</MobileEmpty>
+    ) : (
+      <WithdrawForm
+        amount={amountInput}
+        note={note}
+        error={error}
+        cancelHref={backHref}
+        warnWithdrawAmount={Astro.locals.config.warnWithdrawAmount}
+        fix={fix}
+      >
+        <CustomerPicker slot="picker" client:load required initial={selectedCustomer ? toCustomerOption(selectedCustomer) : null} />
+      </WithdrawForm>
+    )
+  }
+</Layout>
+
+<script>
+  import { rupiah, setupConfirmSheet } from '../../lib/client/confirmSheet';
+
+  function initWithdrawForm() {
+    const form = document.getElementById('withdraw-form') as HTMLFormElement | null;
+    if (!form || form.dataset.bound === '1') return;
+    form.dataset.bound = '1';
+
+    const largeAmount = Number(form.dataset.warnAmount ?? 1_000_000);
+    const select = document.getElementById('customerId') as HTMLInputElement | null;
+    const input = document.getElementById('amount') as HTMLInputElement | null;
+    const balanceInfo = document.getElementById('balance-info');
+    const withdrawInfo = document.getElementById('withdraw-info');
+    const remaining = document.getElementById('remaining');
+    const insufficient = document.getElementById('insufficient');
+    const currency = rupiah;
+
+    function formatAmountInput(v: string) {
+      v = v.replace(/[^\d,]/g, '');
+      const [int = '', ...rest] = v.split(',');
+      const grouped = int.replace(/^0+(?=\d)/, '').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+      return rest.length ? `${grouped},${rest.join('').slice(0, 2)}` : grouped;
+    }
+    const parseAmount = (v: string) => Number(v.replace(/\./g, '').replace(',', '.')) || 0;
+    const selectedOption = () => (select?.value ? select : null);
+    const fixCustomer = form.dataset.fixCustomer;
+    const fixCredit = Number(form.dataset.fixCredit ?? 0);
+    const availableBalance = () => {
+      const raw = selectedOption()?.dataset.customerBalance;
+      if (!raw) return null;
+      return Number(raw) + (fixCustomer && select?.value === fixCustomer ? fixCredit : 0);
+    };
+
+    function updateSummary() {
+      const balance = availableBalance();
+      const amount = input ? parseAmount(input.value) : 0;
+      if (balanceInfo) balanceInfo.textContent = balance === null ? '-' : currency.format(balance);
+      if (withdrawInfo) withdrawInfo.textContent = amount ? `−${currency.format(amount)}` : '-';
+      if (remaining) remaining.textContent = balance === null ? '-' : currency.format(balance - amount);
+      if (insufficient) insufficient.hidden = balance === null || amount <= balance;
+    }
+
+    input?.addEventListener('input', () => {
+      input.value = formatAmountInput(input.value);
+      updateSummary();
+    });
+    select?.addEventListener('change', updateSummary);
+    if (input?.value) input.value = formatAmountInput(input.value);
+    updateSummary();
+
+    form.querySelectorAll<HTMLButtonElement>('[data-amount]').forEach((b) =>
+      b.addEventListener('click', () => {
+        if (!input) return;
+        input.value = formatAmountInput(b.dataset.amount ?? '');
+        updateSummary();
+      }),
+    );
+    form.querySelector<HTMLButtonElement>('[data-all]')?.addEventListener('click', () => {
+      const balance = availableBalance();
+      if (balance !== null && input) input.value = formatAmountInput(String(balance).replace('.', ','));
+      updateSummary();
+    });
+
+    setupConfirmSheet(form, 'withdraw-confirm', () => {
+      const opt = selectedOption();
+      const balance = availableBalance() ?? 0;
+      const amount = input ? parseAmount(input.value) : 0;
+      const warnings: string[] = [];
+      if (amount > balance) warnings.push('Saldo tidak mencukupi.');
+      else if (amount === balance) warnings.push('Seluruh saldo akan ditarik.');
+      if (largeAmount > 0 && amount >= largeAmount) warnings.push(`Nominal besar (${rupiah.format(amount)}). Pastikan jumlah nol tidak salah ketik.`);
+      return {
+        rows: [
+          ...(form.dataset.fixNumber ? [{ label: 'Menggantikan', value: `#${form.dataset.fixNumber} (dibatalkan)` }] : []),
+          { label: 'Dari rekening', value: opt?.dataset.customerName || '-' },
+          { label: 'Saldo tersedia', value: rupiah.format(balance) },
+          { label: 'Jumlah penarikan', value: rupiah.format(amount), strong: true },
+          { label: 'Sisa saldo', value: rupiah.format(balance - amount) },
+        ],
+        warnings,
+        block: amount > balance,
+      };
+    });
+  }
+
+  document.addEventListener('astro:page-load', initWithdrawForm);
+</script>

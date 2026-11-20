@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-banksampah}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ganti-password-db}
+      POSTGRES_DB: ${POSTGRES_DB:-banksampah}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-banksampah} -d ${POSTGRES_DB:-banksampah}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ALLOWED_DOMAINS: ${ALLOWED_DOMAINS:-localhost,127.0.0.1}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-4321}:4321"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 4321
+      DATABASE_URL: postgresql://${POSTGRES_USER:-banksampah}:${POSTGRES_PASSWORD:-ganti-password-db}@db:5432/${POSTGRES_DB:-banksampah}?schema=public
+      DATABASE_URL_UNPOOLED: postgresql://${POSTGRES_USER:-banksampah}:${POSTGRES_PASSWORD:-ganti-password-db}@db:5432/${POSTGRES_DB:-banksampah}?schema=public
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-ganti-password-admin}
+      COOKIE_SECURE: ${COOKIE_SECURE:-}
+      ALLOWED_DOMAINS: ${ALLOWED_DOMAINS:-localhost,127.0.0.1}
+
+volumes:
+  pgdata:

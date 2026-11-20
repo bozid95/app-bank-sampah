@@ -1,0 +1,230 @@
+---
+import { BalanceCard, QuickActions } from './mobile/Wallet';
+import { MobilePager, SectionHeader, TransactionList } from './mobile/Lists';
+import { groupTransactions } from '../lib/mobile';
+import { CustomerProfileCard, PassbookTable } from './views/Customers';
+import { BankStatementPrint } from './views/BankStatementPrint';
+import { EcoLevelBadge } from './views/EcoImpactCard';
+import { loadCustomerEcoImpact } from '../lib/ecoImpact';
+import { getTimezone } from '../lib/config';
+import { parseMonthParam, recentMonthOptions } from '../lib/period';
+import { prisma } from '../lib/prisma';
+import { PAGE_SIZE, formatDateTime, formatKg, formatRupiah, initials, parsePage, transactionLabel } from '../lib/format';
+import { paginationProps } from '../lib/pagination';
+import { COUNTED, reversalLabel, transactionStatus, txActions } from '../lib/transactions';
+import { TxActionDialogs } from './views/TxActions';
+import type { Prisma } from '../generated/prisma/client';
+
+interface Props {
+  customerId: number;
+  admin?: boolean;
+}
+const { customerId, admin = false } = Astro.props;
+const config = Astro.locals.config;
+const tz = getTimezone(config.timezone);
+const page = parsePage(Astro.url);
+const month = parseMonthParam(Astro.url.searchParams.get('month'), tz.offsetHours);
+const monthOptions = recentMonthOptions(tz.offsetHours);
+
+const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+if (!customer) throw new Error('Customer not found');
+
+const txWhere: Prisma.TransactionWhereInput = {
+  customerId,
+  ...(month ? { createdAt: { gte: month.start, lt: month.end } } : {}),
+};
+const countedWhere: Prisma.TransactionWhereInput = { ...COUNTED, ...txWhere };
+
+const [total, rows, deposits, withdrawals, weight, ecoImpact, periodDeposits, periodWithdrawals, periodWeight, beforePeriodTx, monthPrintRows] =
+  await Promise.all([
+    prisma.transaction.count({ where: txWhere }),
+    prisma.transaction.findMany({
+      where: txWhere,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+      include: { items: { include: { wasteType: true } } },
+    }),
+    prisma.transaction.aggregate({ _sum: { amount: true }, where: { ...COUNTED, customerId, type: 'DEPOSIT' } }),
+    prisma.transaction.aggregate({ _sum: { amount: true }, where: { ...COUNTED, customerId, type: 'WITHDRAWAL' } }),
+    prisma.depositItem.aggregate({ _sum: { weightKg: true }, where: { transaction: { ...COUNTED, customerId } } }),
+    loadCustomerEcoImpact(customerId, config.ecoLevels),
+    month ? prisma.transaction.aggregate({ _sum: { amount: true }, where: { ...countedWhere, type: 'DEPOSIT' } }) : null,
+    month ? prisma.transaction.aggregate({ _sum: { amount: true }, where: { ...countedWhere, type: 'WITHDRAWAL' } }) : null,
+    month ? prisma.depositItem.aggregate({ _sum: { weightKg: true }, where: { transaction: countedWhere } }) : null,
+    month
+      ? prisma.transaction.findFirst({
+          where: { customerId, createdAt: { lt: month.start } },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          select: { balanceAfter: true },
+        })
+      : null,
+    month
+      ? prisma.transaction.findMany({
+          where: txWhere,
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: 1000,
+          include: { items: { include: { wasteType: true } } },
+        })
+      : null,
+  ]);
+
+const hrefBase = admin ? '/transactions/' : '/me/transactions/';
+const profile = {
+  id: customer.id,
+  name: customer.name,
+  initials: initials(customer.name),
+  accountNumber: customer.accountNumber,
+  address: customer.address,
+  phone: customer.phone,
+  balance: formatRupiah(customer.balance),
+  joinedAt: formatDateTime(customer.createdAt),
+  totalDeposits: formatRupiah(deposits._sum.amount),
+  totalWithdrawals: formatRupiah(withdrawals._sum.amount),
+  totalWeight: formatKg(weight._sum.weightKg),
+  ecoLevel: ecoImpact.currentLevel,
+  co2SavedLabel: ecoImpact.totalKg > 0 ? ecoImpact.co2Label : undefined,
+};
+const pagination = paginationProps(Astro.url, page, total);
+
+const mapRow = (t: (typeof rows)[number]) => ({
+  id: t.id,
+  number: String(t.id).padStart(6, '0'),
+  date: formatDateTime(t.createdAt),
+  type: t.type,
+  status: transactionStatus(t),
+  actions: admin ? txActions(t, customer.name) : undefined,
+  description: t.reversalOfId
+    ? reversalLabel(t.type)
+    : t.type === 'DEPOSIT' && t.items.length
+      ? t.items.map((i) => `${i.wasteType.name} ${formatKg(i.weightKg)}`).join(', ')
+      : transactionLabel(t.type),
+  note: t.note,
+  amount: formatRupiah(t.amount),
+  balanceAfter: formatRupiah(t.balanceAfter),
+});
+
+const passbookRows = rows.map(mapRow);
+const statementOrg = {
+  appName: config.appName,
+  organizationName: config.organizationName,
+  address: config.address,
+  phone: config.phone,
+  email: config.email,
+  receiptFooter: config.receiptFooter,
+};
+const printedAt = formatDateTime(new Date());
+const statementRows = monthPrintRows ? monthPrintRows.map(mapRow) : [...passbookRows].reverse();
+const openingBalanceVal = month ? (beforePeriodTx?.balanceAfter ?? 0) : undefined;
+const closingBalanceVal = month
+  ? (monthPrintRows && monthPrintRows.length > 0 ? monthPrintRows[monthPrintRows.length - 1]!.balanceAfter : openingBalanceVal)
+  : undefined;
+
+const statementCustomer = month
+  ? {
+      ...profile,
+      totalDeposits: formatRupiah(periodDeposits?._sum.amount),
+      totalWithdrawals: formatRupiah(periodWithdrawals?._sum.amount),
+      totalWeight: formatKg(periodWeight?._sum.weightKg),
+    }
+  : profile;
+
+const scopeLabel = month
+  ? `Periode ${month.label} (${statementRows.length} transaksi)`
+  : pagination.totalPages > 1
+    ? `Halaman ${pagination.page} dari ${pagination.totalPages} (${rows.length} dari ${total} transaksi)`
+    : `Seluruh mutasi (${total} transaksi)`;
+---
+
+<div class="only-mobile">
+  <BalanceCard balance={profile.balance} accountNumber={customer.accountNumber} name={customer.name} />
+  <div class="h-4"></div>
+  {
+    admin ? (
+      <>
+        <dl class="mb-4 divide-y rounded-2xl bg-card px-4 text-sm shadow-sm ring-1 ring-foreground/5">
+          <div class="flex items-center justify-between gap-4 py-3"><dt class="text-muted-foreground">Penghargaan</dt><dd><EcoLevelBadge level={ecoImpact.currentLevel} /></dd></div>
+          <div class="flex justify-between gap-4 py-3"><dt class="text-muted-foreground">Alamat</dt><dd class="text-right font-medium">{customer.address || '-'}</dd></div>
+          <div class="flex justify-between gap-4 py-3"><dt class="text-muted-foreground">Telepon</dt><dd class="text-right font-medium">{customer.phone || '-'}</dd></div>
+        </dl>
+        <QuickActions
+          items={[
+            { label: 'Setor', icon: 'in', tone: 'green', href: `/transactions/deposit?customer=${customer.id}` },
+            { label: 'Tarik', icon: 'out', tone: 'orange', href: `/transactions/withdraw?customer=${customer.id}` },
+            { label: 'Edit', icon: 'edit', tone: 'blue', href: `/customers/${customer.id}/edit` },
+            { label: 'Cetak', icon: 'printer', tone: 'purple', print: true },
+          ]}
+        />
+      </>
+    ) : (
+      <div class="mb-4 grid grid-cols-3 gap-2 rounded-2xl bg-card p-3 text-center shadow-sm ring-1 ring-foreground/5">
+        <div><div class="text-[11px] text-muted-foreground">Total setoran</div><div class="text-sm font-semibold tabular-nums">{profile.totalDeposits}</div></div>
+        <div><div class="text-[11px] text-muted-foreground">Total tarik</div><div class="text-sm font-semibold tabular-nums">{profile.totalWithdrawals}</div></div>
+        <div><div class="text-[11px] text-muted-foreground">Total sampah</div><div class="text-sm font-semibold tabular-nums">{profile.totalWeight}</div></div>
+      </div>
+    )
+  }
+
+  <form method="get" class="mb-3 flex items-center gap-2">
+    <div class="relative flex-1">
+      <select
+        name="month"
+        data-auto-submit
+        aria-label="Filter bulan"
+        class="h-10 w-full appearance-none rounded-xl border border-input bg-card pr-9 pl-3.5 text-sm font-medium outline-none focus:border-ring"
+      >
+        <option value="" selected={!month}>Semua periode</option>
+        {monthOptions.map((m) => (
+          <option value={m.value} selected={month?.value === m.value}>{m.label}</option>
+        ))}
+      </select>
+      <svg class="pointer-events-none absolute top-1/2 right-3 size-4 -translate-y-1/2 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+    </div>
+    {!admin && (
+      <button type="button" data-print class="h-10 rounded-xl bg-primary px-3.5 text-sm font-medium text-primary-foreground">Cetak</button>
+    )}
+  </form>
+
+  <div data-swap="passbook-mobile">
+    <SectionHeader title={month ? `Mutasi · ${month.label}` : 'Riwayat mutasi'} />
+    <TransactionList
+      groups={groupTransactions(rows, { mode: 'customer', hrefBase, showBalance: true, actions: admin })}
+      empty={month ? 'Tidak ada transaksi pada bulan ini.' : 'Belum ada transaksi.'}
+    />
+    <MobilePager {...pagination} />
+  </div>
+</div>
+
+<div class="only-desktop grid gap-4 print:hidden">
+  <CustomerProfileCard c={profile} admin={admin} />
+  <div data-swap="passbook-desktop">
+    <PassbookTable
+      rows={passbookRows}
+      hrefBase={hrefBase}
+      pagination={pagination}
+      admin={admin}
+      month={month?.value ?? ''}
+      monthOptions={monthOptions}
+    />
+  </div>
+</div>
+
+<div data-swap="statement-print">
+  <BankStatementPrint
+    org={statementOrg}
+    customer={statementCustomer}
+    rows={statementRows}
+    printedAt={printedAt}
+    scopeLabel={scopeLabel}
+    periodLabel={month ? `Periode ${month.label}` : undefined}
+    openingBalance={openingBalanceVal !== undefined ? formatRupiah(openingBalanceVal) : undefined}
+    closingBalance={closingBalanceVal !== undefined ? formatRupiah(closingBalanceVal) : undefined}
+  />
+</div>
+
+{admin && <TxActionDialogs />}
+
+<script>
+  import { setupTxActions } from '../lib/client/txActions';
+  document.addEventListener('astro:page-load', setupTxActions);
+</script>

@@ -1,0 +1,353 @@
+---
+import { ClientRouter } from 'astro:transitions';
+import '../styles/global.css';
+import DesktopShell from '../components/app/DesktopShell';
+import { MobileAppBar, MobileBottomNav } from '../components/mobile/MobileChrome';
+import { FlashAlert } from '../components/views/FlashAlert';
+import { initials } from '../lib/format';
+import { brandStyle } from '../lib/config';
+
+interface Props {
+  title: string;
+  back?: string;
+  home?: boolean;
+  form?: boolean;
+}
+const { title, back, home = false, form = false } = Astro.props;
+const user = Astro.locals.user;
+const config = Astro.locals.config;
+const path = Astro.url.pathname;
+const ok = Astro.url.searchParams.get('ok');
+const err = Astro.url.searchParams.get('err');
+
+const isTransactionDetail = /^\/transactions\/\d+$/.test(path);
+const bottomLinks =
+  user?.role === 'ADMIN'
+    ? [
+        { href: '/', label: 'Beranda', icon: 'home', active: path === '/' },
+        { href: '/customers', label: 'Nasabah', icon: 'users', active: path.startsWith('/customers') },
+        { href: '/transactions/deposit', label: 'Setor', icon: 'plus', active: path === '/transactions/deposit', center: true },
+        { href: '/transactions', label: 'Mutasi', icon: 'list', active: path === '/transactions' || isTransactionDetail },
+        {
+          href: '/menu', label: 'Menu', icon: 'grid',
+          active: ['/menu', '/waste-types', '/users', '/settings', '/data'].some((p) => path.startsWith(p)) || path === '/transactions/withdraw',
+        },
+      ]
+    : [
+        { href: '/me', label: 'Beranda', icon: 'home', active: path === '/me' || path === '/me/prices' },
+        { href: '/me/statement', label: 'Mutasi', icon: 'list', active: path.startsWith('/me/statement') || path.startsWith('/me/transactions') },
+        { href: '/menu', label: 'Akun', icon: 'user', active: path.startsWith('/menu') },
+      ];
+---
+
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content={config.primaryColor} />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content={config.appName} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>{title} · {config.appName}</title>
+    <ClientRouter />
+    <style is:inline set:html={brandStyle(config)}></style>
+    <script is:inline define:vars={{ defaultTheme: config.defaultTheme }}>
+      (() => {
+        const applyTheme = () => {
+          try {
+            localStorage.removeItem('bs_theme');
+          } catch {}
+          const mode = defaultTheme || 'system';
+          const isDark =
+            mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.classList.toggle('dark', isDark);
+          const meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', isDark ? '#131816' : '{config.primaryColor}');
+        };
+        applyTheme();
+        if (!window.__bsThemeBound) {
+          window.__bsThemeBound = true;
+          document.addEventListener('astro:after-swap', applyTheme);
+        }
+      })();
+    </script>
+  </head>
+  <body class="bg-background antialiased text-foreground">
+    <div
+      id="nav-progress"
+      aria-hidden="true"
+      class="pointer-events-none fixed inset-x-0 top-0 z-[100] h-1 origin-left scale-x-0 bg-gradient-to-r from-amber-300 via-yellow-200 to-white opacity-0 shadow-[0_1px_10px_rgba(251,191,36,0.95)] md:from-primary md:via-emerald-400 md:to-primary md:shadow-[0_1px_8px_rgba(16,185,129,0.55)] print:hidden"
+    ></div>
+
+    {
+      user ? (
+        <DesktopShell
+          role={user.role}
+          path={path}
+          username={user.username}
+          appName={config.appName}
+          organizationName={config.organizationName}
+          title={title}
+        >
+          <Fragment slot="actions"><slot name="actions" /></Fragment>
+
+          <MobileAppBar title={home ? config.appName : title} back={back} avatar={initials(user.username)} />
+
+          <div
+            id="nav-skeleton"
+            aria-hidden="true"
+            class="fixed inset-x-0 top-14 bottom-0 z-20 hidden overflow-hidden bg-background/95 p-4 pb-24 backdrop-blur-[2px] md:left-64 md:p-8 print:hidden"
+          >
+            <div class="mx-auto w-full max-w-[1200px]">
+              <div class="grid gap-4 md:hidden">
+                <div class="h-36 animate-pulse rounded-2xl bg-muted"></div>
+                <div class="grid grid-cols-4 gap-3 px-1">
+                  <div class="h-14 animate-pulse rounded-2xl bg-muted/80"></div>
+                  <div class="h-14 animate-pulse rounded-2xl bg-muted/80"></div>
+                  <div class="h-14 animate-pulse rounded-2xl bg-muted/80"></div>
+                  <div class="h-14 animate-pulse rounded-2xl bg-muted/80"></div>
+                </div>
+                <div class="grid gap-2.5 rounded-2xl border bg-card p-3.5">
+                  <div class="h-12 animate-pulse rounded-xl bg-muted/60"></div>
+                  <div class="h-12 animate-pulse rounded-xl bg-muted/60"></div>
+                  <div class="h-12 animate-pulse rounded-xl bg-muted/60"></div>
+                  <div class="h-12 animate-pulse rounded-xl bg-muted/60"></div>
+                </div>
+              </div>
+
+              <div class="hidden gap-4 md:grid">
+                <div class="grid gap-2">
+                  <div class="h-7 w-48 animate-pulse rounded-lg bg-muted"></div>
+                  <div class="h-4 w-72 animate-pulse rounded-md bg-muted/80"></div>
+                </div>
+                <div class="grid grid-cols-3 gap-4">
+                  <div class="h-28 animate-pulse rounded-2xl bg-muted/80"></div>
+                  <div class="h-28 animate-pulse rounded-2xl bg-muted/80"></div>
+                  <div class="h-28 animate-pulse rounded-2xl bg-muted/80"></div>
+                </div>
+                <div class="grid gap-2.5 rounded-2xl border bg-card p-4">
+                  <div class="h-9 w-full animate-pulse rounded-lg bg-muted/70"></div>
+                  <div class="h-12 w-full animate-pulse rounded-lg bg-muted/50"></div>
+                  <div class="h-12 w-full animate-pulse rounded-lg bg-muted/50"></div>
+                  <div class="h-12 w-full animate-pulse rounded-lg bg-muted/50"></div>
+                  <div class="h-12 w-full animate-pulse rounded-lg bg-muted/50"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div
+            class:list={[
+              'page relative mx-auto w-full max-w-[1200px] px-4 pt-4 md:px-8 md:pt-7 md:pb-16',
+              form ? 'pb-[calc(6.5rem+env(safe-area-inset-bottom))]' : 'pb-[calc(6rem+env(safe-area-inset-bottom))]',
+            ]}
+          >
+            <div id="page-body">
+              <FlashAlert ok={ok} err={err} />
+              <slot />
+            </div>
+          </div>
+
+          {!form && <MobileBottomNav items={bottomLinks} />}
+        </DesktopShell>
+      ) : (
+        <slot />
+      )
+    }
+
+    <script>
+      import { navigate } from 'astro:transitions/client';
+
+      const HIDE_KEY = 'bs_hide_balance';
+      let balanceHidden = false;
+      try {
+        balanceHidden = localStorage.getItem(HIDE_KEY) === '1';
+      } catch {}
+
+      const applyBalance = (hidden: boolean) =>
+        document.querySelectorAll<HTMLElement>('[data-balance]').forEach((el) => (el.dataset.hidden = String(hidden)));
+
+      function initPage() {
+        applyBalance(balanceHidden);
+        const alertDialog = document.getElementById('app-alert') as HTMLDialogElement | null;
+        if (alertDialog && !alertDialog.open) {
+          alertDialog.showModal();
+          const clean = new URL(location.href);
+          if (clean.searchParams.has('ok') || clean.searchParams.has('err')) {
+            clean.searchParams.delete('ok');
+            clean.searchParams.delete('err');
+            history.replaceState(null, '', clean.pathname + clean.search + clean.hash);
+          }
+          alertDialog.querySelector('[data-alert-close]')?.addEventListener('click', () => alertDialog.close());
+          alertDialog.addEventListener('click', (e) => {
+            if (e.target === alertDialog) alertDialog.close();
+          });
+        }
+      }
+
+      const w = window as unknown as { __bsGlobalBound?: boolean };
+      if (!w.__bsGlobalBound) {
+        w.__bsGlobalBound = true;
+        let skelTimer: number | undefined;
+
+        const startNav = (showSkeleton = true) => {
+          const bar = document.getElementById('nav-progress');
+          if (bar) {
+            bar.style.transition = 'none';
+            bar.style.transform = 'scaleX(0.25)';
+            bar.style.opacity = '1';
+            void bar.offsetWidth;
+            bar.style.transition = 'transform 8s cubic-bezier(.1,.85,.2,1), opacity .12s';
+            bar.style.transform = 'scaleX(0.92)';
+          }
+          clearTimeout(skelTimer);
+          if (showSkeleton) {
+            skelTimer = window.setTimeout(() => {
+              document.getElementById('nav-skeleton')?.classList.remove('hidden');
+            }, 50);
+          }
+        };
+
+        const finishNav = () => {
+          clearTimeout(skelTimer);
+          document.getElementById('nav-skeleton')?.classList.add('hidden');
+          const bar = document.getElementById('nav-progress');
+          if (bar) {
+            bar.style.transition = 'transform .15s ease-out, opacity .2s ease-out .12s';
+            bar.style.transform = 'scaleX(1)';
+            bar.style.opacity = '0';
+            window.setTimeout(() => {
+              bar.style.transition = 'none';
+              bar.style.transform = 'scaleX(0)';
+            }, 320);
+          }
+        };
+
+        document.addEventListener('astro:before-preparation', () => startNav(true));
+        document.addEventListener('astro:after-swap', finishNav);
+        document.addEventListener('astro:page-load', () => {
+          finishNav();
+          initPage();
+        });
+
+        let swapAbort: AbortController | null = null;
+
+        const partialSwap = async (rawUrl: string) => {
+          const targets = document.querySelectorAll<HTMLElement>('[data-swap]');
+          if (targets.length === 0) {
+            navigate(rawUrl);
+            return;
+          }
+          swapAbort?.abort();
+          swapAbort = new AbortController();
+          startNav(false);
+          targets.forEach((el) => el.classList.add('opacity-50', 'pointer-events-none', 'transition-opacity'));
+          try {
+            const res = await fetch(rawUrl, {
+              headers: { 'X-Partial': '1' },
+              signal: swapAbort.signal,
+            });
+            if (res.redirected && new URL(res.url).pathname === '/login') {
+              location.href = '/login';
+              return;
+            }
+            if (!res.ok) throw new Error('Partial fetch failed');
+            const html = await res.text();
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            targets.forEach((el) => {
+              const key = el.dataset.swap;
+              if (!key) return;
+              const next = doc.querySelector<HTMLElement>(`[data-swap="${key}"]`);
+              if (next) el.innerHTML = next.innerHTML;
+              el.classList.remove('opacity-50', 'pointer-events-none');
+            });
+            history.replaceState(null, '', rawUrl);
+            applyBalance(balanceHidden);
+          } catch (err) {
+            if ((err as Error)?.name === 'AbortError') return;
+            targets.forEach((el) => el.classList.remove('opacity-50', 'pointer-events-none'));
+            navigate(rawUrl);
+          } finally {
+            finishNav();
+          }
+        };
+
+        const navigateForm = (form: HTMLFormElement) => {
+          const url = new URL(form.action || location.href, location.href);
+          const params = new URLSearchParams();
+          for (const [k, v] of new FormData(form).entries()) {
+            if (typeof v === 'string' && v.trim() !== '') params.append(k, v);
+          }
+          url.search = params.toString();
+          const dest = url.pathname + url.search;
+          if (url.pathname === location.pathname && document.querySelector('[data-swap]')) {
+            partialSwap(dest);
+          } else {
+            navigate(dest);
+          }
+        };
+
+        document.addEventListener('change', (e) => {
+          const el = e.target as HTMLElement | null;
+          if (el?.matches('[data-auto-submit]')) {
+            const form = el.closest('form');
+            if (form) navigateForm(form);
+          }
+        });
+
+        document.addEventListener('submit', (e) => {
+          const form = e.target as HTMLFormElement | null;
+          const message = form?.dataset.confirm;
+          if (message && !confirm(message)) {
+            e.preventDefault();
+            return;
+          }
+          if (form && (form.method || 'get').toLowerCase() === 'get') {
+            e.preventDefault();
+            navigateForm(form);
+            return;
+          }
+          window.setTimeout(() => {
+            if (!e.defaultPrevented) startNav(false);
+          }, 0);
+        });
+
+        document.addEventListener('click', async (e) => {
+          const target = e.target as HTMLElement | null;
+          const partialLink = target?.closest<HTMLAnchorElement>('a[data-partial]');
+          if (partialLink && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.button === 0) {
+            const url = new URL(partialLink.href, location.href);
+            if (url.origin === location.origin && url.pathname === location.pathname && document.querySelector('[data-swap]')) {
+              e.preventDefault();
+              partialSwap(url.pathname + url.search);
+              return;
+            }
+          }
+          if (target?.closest('[data-print]')) window.print();
+
+          if (target?.closest('[data-balance-toggle]')) {
+            balanceHidden = !balanceHidden;
+            applyBalance(balanceHidden);
+            try {
+              localStorage.setItem(HIDE_KEY, balanceHidden ? '1' : '0');
+            } catch {}
+          }
+
+          const copy = target?.closest<HTMLElement>('[data-copy]');
+          if (copy) {
+            try {
+              await navigator.clipboard.writeText(copy.dataset.copy ?? '');
+              copy.setAttribute('data-copied', '');
+              setTimeout(() => copy.removeAttribute('data-copied'), 1200);
+            } catch {}
+          }
+        });
+      }
+    </script>
+  </body>
+</html>

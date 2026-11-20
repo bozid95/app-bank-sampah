@@ -1,0 +1,127 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  username     String    @unique
+  passwordHash String
+  role         Role      @default(USER)
+  customerId   Int?      @unique
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  sessions     Session[]
+  createdAt    DateTime  @default(now())
+}
+
+model Session {
+  id        String   @id
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Customer {
+  id            Int           @id @default(autoincrement())
+  accountNumber String        @unique
+  name          String
+  address       String?
+  phone         String?
+  balance       Decimal       @default(0) @db.Decimal(14, 2)
+  user          User?
+  transactions  Transaction[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([name])
+}
+
+model WasteType {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique
+  pricePerKg   Decimal       @db.Decimal(12, 2)
+  isActive     Boolean       @default(true)
+  depositItems DepositItem[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model Transaction {
+  id           Int             @id @default(autoincrement())
+  customerId   Int
+  customer     Customer        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  type         TransactionType
+  amount       Decimal         @db.Decimal(14, 2)
+  balanceAfter Decimal         @db.Decimal(14, 2)
+  note         String?
+  processedBy  String
+  createdAt    DateTime        @default(now())
+  items        DepositItem[]
+  voidedAt     DateTime?
+  voidedBy     String?
+  voidReason   String?
+  reversalOfId Int?            @unique
+  reversalOf   Transaction?    @relation("Reversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversal     Transaction?    @relation("Reversal")
+
+  @@index([customerId, createdAt])
+  @@index([createdAt])
+}
+
+model DepositItem {
+  id            Int         @id @default(autoincrement())
+  transactionId Int
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  wasteTypeId   Int
+  wasteType     WasteType   @relation(fields: [wasteTypeId], references: [id], onDelete: Restrict)
+  weightKg      Decimal     @db.Decimal(10, 3)
+  pricePerKg    Decimal     @db.Decimal(12, 2)
+  subtotal      Decimal     @db.Decimal(14, 2)
+
+  @@index([transactionId])
+}
+
+model AppConfig {
+  id                  Int      @id @default(1)
+  appName             String   @default("Bank Sampah")
+  organizationName    String   @default("Bank Sampah")
+  tagline             String   @default("Tabung sampahmu, kumpulkan saldonya")
+  address             String?
+  phone               String?
+  email               String?
+  primaryColor        String   @default("#1f7a4d")
+  defaultTheme        String   @default("system")
+  accountNumberPrefix String   @default("BS")
+  timezone            String   @default("Asia/Jakarta")
+  receiptFooter       String?
+  warnWeightKg        Int      @default(100)
+  warnWithdrawAmount  Int      @default(1000000)
+  ecoLevels           Json?
+  updatedAt           DateTime @updatedAt
+}
+
+model LoginAttempt {
+  key       String   @id
+  count     Int      @default(0)
+  resetAt   DateTime
+  updatedAt DateTime @updatedAt
+
+  @@index([resetAt])
+}

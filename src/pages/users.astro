@@ -1,0 +1,134 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { prisma } from '../lib/prisma';
+import { hashPassword } from '../lib/auth';
+import { PAGE_SIZE, flash, formatDateTime, initials, parseId, parsePage, str } from '../lib/format';
+import { paginationProps } from '../lib/pagination';
+import { toCustomerOption } from '../lib/customerOption';
+import { CustomerPicker } from '../components/app/CustomerPicker';
+import { MobilePager, MobileSearch } from '../components/mobile/Lists';
+import type { Prisma } from '../generated/prisma/client';
+import { CreateUserForm, UsersMobileList, UsersTable } from '../components/views/Users';
+
+const me = Astro.locals.user!;
+let error = '';
+let values = { username: '', role: 'USER', customerId: '' };
+
+const isValidUsername = (u: string) => /^[a-z0-9._-]{3,30}$/.test(u);
+const getPassword = (fd: FormData) => (typeof fd.get('password') === 'string' ? (fd.get('password') as string) : '');
+
+if (Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  const action = str(fd, '_action');
+
+  if (action === 'create') {
+    const username = str(fd, 'username').toLowerCase();
+    const password = getPassword(fd);
+    const role = str(fd, 'role') === 'ADMIN' ? 'ADMIN' : 'USER';
+    const customerId = role === 'USER' ? parseId(str(fd, 'customerId')) : null;
+    values = { username, role, customerId: customerId ? String(customerId) : '' };
+
+    if (!isValidUsername(username)) {
+      error = 'Username 3–30 karakter: huruf kecil, angka, titik, strip, atau underscore.';
+    } else if (password.length < 8 || password.length > 72) {
+      error = 'Password harus 8–72 karakter.';
+    } else if (role === 'USER' && !customerId) {
+      error = 'Akun nasabah harus dihubungkan ke data nasabah.';
+    } else if (await prisma.user.findUnique({ where: { username } })) {
+      error = 'Username sudah dipakai.';
+    } else if (customerId && (await prisma.user.findUnique({ where: { customerId } }))) {
+      error = 'Nasabah ini sudah punya akun.';
+    } else {
+      await prisma.user.create({
+        data: { username, passwordHash: await hashPassword(password), role, customerId },
+      });
+      return Astro.redirect(flash('/users', 'ok', `Akun ${username} dibuat.`));
+    }
+  } else if (action === 'reset') {
+    const id = parseId(str(fd, 'id'));
+    const password = getPassword(fd);
+    if (!id) {
+      error = 'Pengguna tidak valid.';
+    } else if (password.length < 8 || password.length > 72) {
+      error = 'Password baru harus 8–72 karakter.';
+    } else {
+      await prisma.$transaction([
+        prisma.user.update({ where: { id }, data: { passwordHash: await hashPassword(password) } }),
+        prisma.session.deleteMany({ where: { userId: id } }), // paksa login ulang
+      ]);
+      return Astro.redirect(flash('/users', 'ok', 'Password diperbarui.'));
+    }
+  } else if (action === 'delete') {
+    const id = parseId(str(fd, 'id'));
+    if (!id) {
+      error = 'Pengguna tidak valid.';
+    } else if (id === me.id) {
+      error = 'Anda tidak dapat menghapus akun sendiri.';
+    } else {
+      await prisma.user.deleteMany({ where: { id } });
+      return Astro.redirect(flash('/users', 'ok', 'Akun dihapus.'));
+    }
+  }
+}
+
+// Daftar akun: pencarian (username / nama / no. rekening nasabah) + paginasi
+const q = (Astro.url.searchParams.get('q') ?? '').trim().slice(0, 80);
+const page = parsePage(Astro.url);
+const where: Prisma.UserWhereInput = q
+  ? {
+      OR: [
+        { username: { contains: q, mode: 'insensitive' } },
+        { customer: { name: { contains: q, mode: 'insensitive' } } },
+        { customer: { accountNumber: { contains: q, mode: 'insensitive' } } },
+      ],
+    }
+  : {};
+const [total, users, selectedCustomer] = await Promise.all([
+  prisma.user.count({ where }),
+  prisma.user.findMany({
+    where,
+    orderBy: [{ role: 'asc' }, { username: 'asc' }],
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
+    include: { customer: true },
+  }),
+  values.customerId ? prisma.customer.findUnique({ where: { id: Number(values.customerId) } }) : null,
+]);
+const pagination = paginationProps(Astro.url, page, total);
+const userRows = users.map((u) => ({
+  id: u.id,
+  username: u.username,
+  initials: initials(u.username),
+  role: u.role,
+  customer: u.customer ? { id: u.customer.id, name: u.customer.name, accountNumber: u.customer.accountNumber } : null,
+  isMe: u.id === me.id,
+  createdAt: formatDateTime(u.createdAt),
+}));
+---
+
+<Layout title="Pengguna" back="/menu">
+  <h1>Pengguna</h1>
+  <p class="page-desc">Akun admin/petugas dan akun nasabah untuk masuk ke aplikasi.</p>
+
+  <div class="grid gap-4 lg:grid-cols-[1fr_340px] lg:items-start">
+    <div class="only-desktop" data-swap="users-desktop"><UsersTable rows={userRows} q={q} pagination={pagination} /></div>
+    <CreateUserForm values={values} error={error}>
+      <CustomerPicker
+        slot="picker"
+        client:load
+        unlinked
+        showBalance={false}
+        initial={selectedCustomer ? toCustomerOption(selectedCustomer) : null}
+      />
+    </CreateUserForm>
+  </div>
+
+  <div class="only-mobile">
+    <h2 class="mt-6 mb-2 px-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">Daftar akun · {total}</h2>
+    <MobileSearch q={q} placeholder="Cari username atau nama nasabah" />
+    <div data-swap="users-mobile">
+      <UsersMobileList rows={userRows} empty={q ? 'Akun tidak ditemukan.' : 'Belum ada akun.'} />
+      <MobilePager {...pagination} />
+    </div>
+  </div>
+</Layout>

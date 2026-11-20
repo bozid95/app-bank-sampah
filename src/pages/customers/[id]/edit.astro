@@ -1,0 +1,62 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import { CustomerForm } from '../../../components/views/CustomerForm';
+import { DangerZone } from '../../../components/views/forms';
+import { prisma } from '../../../lib/prisma';
+import { flash, formatRupiah, parseId, str, validateCustomer } from '../../../lib/format';
+
+const id = parseId(Astro.params.id);
+const customer = id
+  ? await prisma.customer.findUnique({ where: { id }, include: { _count: { select: { transactions: true } } } })
+  : null;
+if (!customer) return new Response('Nasabah tidak ditemukan', { status: 404 });
+
+const hasTransactions = customer._count.transactions > 0;
+let error = '';
+let values = { name: customer.name, address: customer.address ?? '', phone: customer.phone ?? '' };
+
+if (Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  const action = str(fd, '_action');
+
+  if (action === 'delete') {
+    if (hasTransactions || Number(customer.balance) !== 0) {
+      error = 'Nasabah yang punya riwayat transaksi tidak dapat dihapus agar buku tabungan tetap utuh.';
+    } else {
+      await prisma.customer.delete({ where: { id: customer.id } });
+      return Astro.redirect(flash('/customers', 'ok', `Nasabah ${customer.name} dihapus.`));
+    }
+  } else {
+    values = { name: str(fd, 'name'), address: str(fd, 'address'), phone: str(fd, 'phone') };
+    error = validateCustomer(values);
+    if (!error) {
+      await prisma.customer.update({
+        where: { id: customer.id },
+        data: { name: values.name, address: values.address || null, phone: values.phone || null },
+      });
+      return Astro.redirect(flash(`/customers/${customer.id}`, 'ok', 'Data nasabah diperbarui.'));
+    }
+  }
+}
+---
+
+<Layout title="Edit Nasabah" back={`/customers/${customer.id}`} form>
+  <h1>Edit Nasabah</h1>
+  <p class="page-desc">No. rekening <strong>{customer.accountNumber}</strong> · Saldo <strong>{formatRupiah(customer.balance)}</strong></p>
+  <div class="max-w-2xl">
+    <CustomerForm
+      values={values}
+      error={error}
+      mode="edit"
+      cancelHref={`/customers/${customer.id}`}
+      accountNumberHint={`No. rekening ${customer.accountNumber} tidak bisa diubah.`}
+    />
+    <DangerZone
+      title="Hapus nasabah"
+      description="Hanya bisa jika belum ada transaksi sama sekali, agar buku tabungan tetap utuh."
+      buttonLabel="Hapus nasabah"
+      confirm="Hapus nasabah ini?"
+      disabled={hasTransactions}
+    />
+  </div>
+</Layout>

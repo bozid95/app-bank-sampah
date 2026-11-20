@@ -1,0 +1,47 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { MenuView } from '../../components/views/MenuView';
+import { prisma } from '../../lib/prisma';
+import { initials } from '../../lib/format';
+
+const user = Astro.locals.user!;
+const isAdmin = user.role === 'ADMIN';
+const customer =
+  !isAdmin && user.customerId ? await prisma.customer.findUnique({ where: { id: user.customerId } }) : null;
+
+const adminMenu = [
+  { href: '/customers', icon: 'users', title: 'Nasabah', sub: 'Daftar, tambah, dan edit nasabah' },
+  { href: '/waste-types', icon: 'tag', title: 'Jenis & harga sampah', sub: 'Atur harga beli per kg' },
+  { href: '/transactions/deposit', icon: 'in', title: 'Setor sampah', sub: 'Catat setoran nasabah' },
+  { href: '/transactions/withdraw', icon: 'out', title: 'Tarik saldo', sub: 'Catat penarikan nasabah' },
+  { href: '/transactions', icon: 'receipt', title: 'Semua transaksi', sub: 'Riwayat setor & tarik' },
+  { href: '/users', icon: 'shield', title: 'Pengguna', sub: 'Akun admin & nasabah' },
+  { href: '/data', icon: 'data', title: 'Impor & ekspor', sub: 'Unduh template, impor & ekspor Excel' },
+  { href: '/settings', icon: 'settings', title: 'Pengaturan', sub: 'Nama, kontak, warna aplikasi' },
+];
+const customerMenu = [
+  { href: '/me/statement', icon: 'list', title: 'Mutasi rekening', sub: 'Riwayat setor & tarik' },
+  { href: '/me/prices', icon: 'tag', title: 'Harga sampah', sub: 'Harga beli per kg saat ini' },
+];
+const name = customer?.name ?? user.username;
+---
+
+<Layout title={isAdmin ? 'Menu' : 'Akun'}>
+  <h1>{isAdmin ? 'Menu' : 'Akun'}</h1>
+  <MenuView
+    name={name}
+    initials={initials(name)}
+    subtitle={isAdmin ? `Administrator · ${user.username}` : `Nasabah · ${customer?.accountNumber ?? '-'}`}
+    account={customer
+      ? [
+          { label: 'No. rekening', value: customer.accountNumber },
+          { label: 'Nama', value: customer.name },
+          { label: 'Alamat', value: customer.address || '-' },
+          { label: 'Telepon', value: customer.phone || '-' },
+          { label: 'Username', value: user.username },
+        ]
+      : null}
+    menuTitle={isAdmin ? 'Kelola' : 'Layanan'}
+    menu={isAdmin ? adminMenu : customerMenu}
+  />
+</Layout>

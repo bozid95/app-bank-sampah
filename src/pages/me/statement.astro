@@ -1,0 +1,26 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Passbook from '../../components/Passbook.astro';
+import { MobileEmpty } from '../../components/mobile/Lists';
+
+const user = Astro.locals.user!;
+---
+
+<Layout title="Mutasi Rekening">
+  <h1 class="print:hidden">Buku Tabungan Saya</h1>
+  {
+    user.customerId ? (
+      <Passbook customerId={user.customerId} />
+    ) : (
+      <MobileEmpty>Akun Anda belum dihubungkan ke data nasabah. Hubungi petugas {Astro.locals.config.organizationName}.</MobileEmpty>
+    )
+  }
+</Layout>
+
+<script>
+  document.addEventListener('astro:page-load', () => {
+    if (new URL(location.href).searchParams.get('print') === '1') {
+      setTimeout(() => window.print(), 300);
+    }
+  });
+</script>

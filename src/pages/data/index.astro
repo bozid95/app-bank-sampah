@@ -1,0 +1,56 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { DataTransferView, type ImportFeedback } from '../../components/views/DataTransfer';
+import { ENTITIES, ENTITY_INFO, importFile, isEntity } from '../../lib/dataTransfer';
+import { prisma } from '../../lib/prisma';
+
+const user = Astro.locals.user!;
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
+let feedback: ImportFeedback = null;
+
+if (Astro.request.method === 'POST') {
+  const fd = await Astro.request.formData();
+  const entity = String(fd.get('entity') ?? '');
+  const file = fd.get('file');
+  if (isEntity(entity)) {
+    const label = ENTITY_INFO[entity].label;
+    if (!(file instanceof File) || file.size === 0) {
+      feedback = { entity, label, ok: false, errors: [{ line: 0, message: 'Pilih file Excel (.xlsx) terlebih dulu.' }] };
+    } else if (file.size > MAX_FILE_BYTES) {
+      feedback = { entity, label, ok: false, errors: [{ line: 0, message: 'Ukuran file maksimal 4 MB. Pecah menjadi beberapa file.' }] };
+    } else {
+      try {
+        const result = await importFile(entity, file, { config: Astro.locals.config, username: user.username, userId: user.id });
+        feedback = { entity, label, ...result };
+      } catch (e) {
+        console.error('Import failed', e);
+        feedback = { entity, label, ok: false, errors: [{ line: 0, message: 'Terjadi kesalahan saat menyimpan data. Tidak ada data yang disimpan. Coba lagi.' }] };
+      }
+    }
+  }
+}
+
+const [customers, wasteTypes, users, transactions] = await Promise.all([
+  prisma.customer.count(),
+  prisma.wasteType.count(),
+  prisma.user.count(),
+  prisma.transaction.count(),
+]);
+const counts: Record<string, number> = { customers, 'waste-types': wasteTypes, users, transactions };
+const cards = ENTITIES.map((key) => ({
+  key,
+  label: ENTITY_INFO[key].label,
+  description: ENTITY_INFO[key].description,
+  maxRows: ENTITY_INFO[key].maxRows,
+  count: counts[key] ?? 0,
+}));
+---
+
+<Layout title="Impor & Ekspor" back="/menu">
+  <h1>Impor & Ekspor</h1>
+  <p class="page-desc">
+    Pindahkan data dari buku manual atau aplikasi lain lewat Excel. Unduh template, isi, lalu unggah.
+    Urutan yang disarankan: jenis sampah → nasabah → pengguna → transaksi.
+  </p>
+  <DataTransferView cards={cards} feedback={feedback} />
+</Layout>
